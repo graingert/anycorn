@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from aioquic.buffer import Buffer
 from aioquic.h3.connection import H3_ALPN, ErrorCode
-from aioquic.quic.configuration import QuicConfiguration
+from aioquic.quic.configuration import SMALLEST_MAX_DATAGRAM_SIZE, QuicConfiguration
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.events import (
     ConnectionIdIssued,
@@ -23,7 +23,7 @@ from aioquic.quic.packet import (
     pull_quic_header,
 )
 
-from anycorn.events import Closed, Event, RawData
+from anycorn.events import Event, RawData
 from anycorn.typing import (
     AppWrapper,
     ConnectionState,
@@ -41,10 +41,8 @@ if TYPE_CHECKING:
 
     from anycorn.config import Config
 
-MIN_INITIAL_DATAGRAM_SIZE = 1200
 
-
-@dataclass
+@dataclass(eq=False)
 class _Connection:
     cids: set[bytes]
     quic: QuicConnection
@@ -115,7 +113,7 @@ class QuicProtocol:
             connection = self.connections.get(header.destination_cid)
             if (
                 connection is None
-                and len(event.data) >= MIN_INITIAL_DATAGRAM_SIZE
+                and len(event.data) >= SMALLEST_MAX_DATAGRAM_SIZE
                 and header.packet_type == PACKET_TYPE_INITIAL
                 and not self.context.terminated.is_set()
             ):
@@ -134,8 +132,6 @@ class QuicProtocol:
             if connection is not None:
                 connection.quic.receive_datagram(event.data, event.address, now=self.context.time())
                 await self._handle_events(connection, event.address)
-        elif isinstance(event, Closed):
-            pass
 
     async def _flush_datagrams(self, connection: _Connection) -> None:
         """Write whatever the connection has queued out to the socket."""
@@ -146,20 +142,14 @@ class QuicProtocol:
         """Tell every peer the connection is going away, as nginx does on shutdown.
 
         Closing a UDP socket sends the peer nothing, so without this a client of a
-        server that has stopped simply waits out its idle timeout rather than being
-        told. nginx's `ngx_quic_close_connection()` sends CONNECTION_CLOSE, so do the
-        same: an application-level close (frame 0x1d, what `frame_type=None` selects)
-        carrying H3_NO_ERROR, matching the NGX_HTTP_V3_ERR_NO_ERROR nginx finalizes a
-        graceful HTTP/3 shutdown with.
-
-        Only the frame is sent. nginx then holds the connection open for 3*PTO to
-        re-send it to any straggling packet, which is of no use here because the
-        socket is closed immediately after the worker stops.
+        server that has stopped waits out its idle timeout rather than being told.
+        H3_NO_ERROR in an application-level close (frame 0x1d, which `frame_type=None`
+        selects) is what nginx finalizes a graceful HTTP/3 shutdown with, and a peer
+        reads any other code as the connection having failed rather than ended.
         """
-        # One connection is registered under each of its connection ids, so walk the
-        # distinct connections rather than sending a close per id. _Connection is an
-        # unhashable dataclass, hence keying on identity rather than using a set.
-        for connection in {id(entry): entry for entry in self.connections.values()}.values():
+        # Registered under each of its connection ids, so close the distinct
+        # connections rather than once per id
+        for connection in set(self.connections.values()):
             connection.quic.close(error_code=ErrorCode.H3_NO_ERROR)
             await self._flush_datagrams(connection)
 
@@ -173,7 +163,22 @@ class QuicProtocol:
                 self.task_group, partial(self._handle_timer, timer, connection)
             )
 
-    async def _handle_events(  # noqa: C901
+    def _tls_extension(self, quic: QuicConnection) -> TLSExtension:
+        """Describe the negotiated TLS to the app, as far as aioquic exposes it."""
+        tls_extension = TLSExtension()
+        if self._server_cert_pem is not None:
+            tls_extension["server_cert"] = self._server_cert_pem
+        tls_context = getattr(quic, "tls", None)
+        if tls_context is not None:
+            tls_version = tls_version_to_int(getattr(tls_context, "version", None))
+            if tls_version is not None:
+                tls_extension["tls_version"] = tls_version
+            cipher_suite = getattr(tls_context, "cipher_suite", None)
+            if isinstance(cipher_suite, int):
+                tls_extension["cipher_suite"] = cipher_suite
+        return tls_extension
+
+    async def _handle_events(
         self, connection: _Connection, client: tuple[str, int] | None = None
     ) -> None:
         event = connection.quic.next_event()
@@ -184,17 +189,6 @@ class QuicProtocol:
                     del self.connections[cid]
                 connection.cids = set()
             elif isinstance(event, ProtocolNegotiated):
-                tls_extension = TLSExtension()
-                if self._server_cert_pem is not None:
-                    tls_extension["server_cert"] = self._server_cert_pem
-                tls_context = getattr(connection.quic, "tls", None)
-                if tls_context is not None:
-                    tls_version = tls_version_to_int(getattr(tls_context, "version", None))
-                    if tls_version is not None:
-                        tls_extension["tls_version"] = tls_version
-                    cipher_suite = getattr(tls_context, "cipher_suite", None)
-                    if isinstance(cipher_suite, int):
-                        tls_extension["cipher_suite"] = cipher_suite
                 connection.h3 = H3Protocol(
                     self.app,
                     self.config,
@@ -204,7 +198,7 @@ class QuicProtocol:
                     # every QUIC connection it is sent, so sharing the worker's state
                     # would hand one client's namespace to the next
                     ConnectionState(self.state.copy()),
-                    tls_extension,
+                    self._tls_extension(connection.quic),
                     client,
                     self.server,
                     connection.quic,

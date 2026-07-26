@@ -443,6 +443,10 @@ class TaskGroup(Protocol):
         """Spawn a background task running func with the given arguments."""
         ...
 
+    async def start(self, func: Callable, *args: Any) -> Any:  # noqa: ANN401
+        """Start func and wait for whatever it reports through its task status."""
+        ...
+
     async def __aenter__(self) -> Self: ...
 
     async def __aexit__(

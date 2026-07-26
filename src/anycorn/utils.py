@@ -84,8 +84,6 @@ _TLS_VERSION_MAP = {
     "TLSv1.3": 0x0304,
 }
 
-_SERVER_CERT_CACHE: dict[str, str | None] = {}
-
 RFC4514_ATTRIBUTE_NAMES = {
     "commonName": "CN",
     "countryName": "C",
@@ -174,13 +172,7 @@ def get_server_certificate_pem(config: Config) -> str | None:
     """Return the PEM-encoded server certificate from config, or None."""
     if config.certfile is None:
         return None
-    path = str(pathlib.Path(config.certfile).resolve())
-    cached = _SERVER_CERT_CACHE.get(path)
-    if cached is not None:
-        return cached
-    cert = _cached_server_cert(path)
-    _SERVER_CERT_CACHE[path] = cert
-    return cert
+    return _cached_server_cert(str(pathlib.Path(config.certfile).resolve()))
 
 
 def _extract_client_chain(ssl_object: ssl.SSLObject) -> tuple[str, ...]:
@@ -428,7 +420,7 @@ def check_for_updates(files: dict[pathlib.Path, float]) -> bool:
 
 async def raise_shutdown(
     shutdown_event: Callable[..., Awaitable],
-    on_shutdown: Callable[[], Awaitable[Any]] | None = None,
+    on_shutdown: Callable[[], Awaitable[Any]],
 ) -> None:
     """Await *shutdown_event*, run *on_shutdown*, then raise ShutdownError.
 
@@ -437,8 +429,7 @@ async def raise_shutdown(
     cancelled cannot stop them accepting anything, because they are already gone.
     """
     await shutdown_event()
-    if on_shutdown is not None:
-        await on_shutdown()
+    await on_shutdown()
     raise ShutdownError
 
 

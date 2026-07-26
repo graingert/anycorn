@@ -205,14 +205,3 @@ async def test_raise_shutdown_marks_termination_before_raising() -> None:
         await raise_shutdown(trigger, on_shutdown)
 
     assert order == ["triggered", "terminated"]
-
-
-@pytest.mark.anyio
-async def test_raise_shutdown_without_a_callback() -> None:
-    """The callback stays optional, so existing callers keep working."""
-
-    async def trigger() -> None:
-        return
-
-    with pytest.raises(ShutdownError):
-        await raise_shutdown(trigger)

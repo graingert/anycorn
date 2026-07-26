@@ -50,7 +50,6 @@ async def _handle(  # noqa: PLR0913
         _, other_errors = error.split(anyio.get_cancelled_exc_class())
         if other_errors is not None:
             await config.log.exception("Error in ASGI Framework")
-            await send(None)
         else:
             raise
     except Exception:  # noqa: BLE001
@@ -99,6 +98,11 @@ class TaskGroup:
         """Spawn an arbitrary coroutine function in the task group."""
         assert self._task_group is not None
         self._task_group.start_soon(func, *args)
+
+    async def start(self, func: Callable, *args: Any) -> Any:  # noqa: ANN401
+        """Start *func* and wait for whatever it reports through its task status."""
+        assert self._task_group is not None
+        return await self._task_group.start(func, *args)
 
     async def __aenter__(self) -> Self:
         tg = anyio.create_task_group()
