@@ -41,7 +41,9 @@ class UDPServer:
         # QUIC drives sends from the timer and stream tasks as well as from the read
         # loop, and anyio permits one writer to a socket at a time - concurrent sends
         # raise BusyResourceError rather than interleaving. Mirrors TCPServer.
-        self.send_lock = anyio.Lock()
+        # fast_acquire skips a checkpoint per send on the uncontended path, which is
+        # every send here bar a collision, and still guards against one.
+        self.send_lock = anyio.Lock(fast_acquire=True)
 
     async def run(
         self, *, task_status: anyio.abc.TaskStatus[None] = anyio.TASK_STATUS_IGNORED
@@ -72,8 +74,10 @@ class UDPServer:
                 # Shutdown cancels this task, and a closed UDP socket tells the peer
                 # nothing, so the close has to be sent before unwinding gets any
                 # further - shielded, or the sends are cancelled too. Bounded so a
-                # peer that cannot be written to cannot hold the worker open.
-                with anyio.move_on_after(CLOSE_TIMEOUT, shield=True):
+                # peer that cannot be written to cannot hold the worker open, and
+                # bounded by the worker's clock so a test can control it.
+                with self.context.move_on_after(CLOSE_TIMEOUT) as scope:
+                    scope.shield = True
                     await self.protocol.close_all()
 
     async def protocol_send(self, event: Event) -> None:

@@ -144,30 +144,18 @@ class H3Protocol:
             elif name == b":path":
                 raw_path = value
 
-        if method == "CONNECT":
-            self.streams[request.stream_id] = WSStream(
-                self.app,
-                self.config,
-                self.context,
-                self.task_group,
-                self.client,
-                self.server,
-                self.stream_send,
-                request.stream_id,
-                self.tls,
-            )
-        else:
-            self.streams[request.stream_id] = HTTPStream(
-                self.app,
-                self.config,
-                self.context,
-                self.task_group,
-                self.client,
-                self.server,
-                self.stream_send,
-                request.stream_id,
-                self.tls,
-            )
+        stream_class = WSStream if method == "CONNECT" else HTTPStream
+        self.streams[request.stream_id] = stream_class(
+            self.app,
+            self.config,
+            self.context,
+            self.task_group,
+            self.client,
+            self.server,
+            self.stream_send,
+            request.stream_id,
+            self.tls,
+        )
 
         await self.streams[request.stream_id].handle(
             Request(

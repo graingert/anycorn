@@ -16,12 +16,12 @@ from .protocol import ProtocolWrapper
 from .task_group import TaskGroup
 from .typing import AppWrapper, ConnectionState, LifespanState
 from .utils import build_tls_extension, parse_socket_addr
-from .worker_context import AnyioSingleTask, WorkerContext
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from .config import Config
+    from .worker_context import WorkerContext
 
 MAX_RECV = 2**16
 
@@ -42,7 +42,7 @@ class TCPServer:
         self.context = context
         self.protocol: ProtocolWrapper
         self.send_lock = anyio.Lock()
-        self.idle_task = AnyioSingleTask()
+        self.idle_task = context.single_task_class()
         self.state = state
         self.stream = stream
 

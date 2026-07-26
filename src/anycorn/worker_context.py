@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from functools import wraps
 from typing import TYPE_CHECKING, ClassVar
 
 import anyio
@@ -15,7 +14,6 @@ if TYPE_CHECKING:
 
 
 def _cancel_wrapper(func: Callable[[], Awaitable[None]]) -> Callable[[], Awaitable[None]]:
-    @wraps(func)
     async def wrapper(
         task_status: anyio.abc.TaskStatus[anyio.CancelScope] = anyio.TASK_STATUS_IGNORED,
     ) -> None:
@@ -32,7 +30,9 @@ class AnyioSingleTask:
 
     def __init__(self) -> None:
         self._handle: anyio.CancelScope | None = None
-        self._lock = anyio.Lock()
+        # Restarted once per datagram sent, so skip the checkpoint anyio's Lock
+        # otherwise takes even when nothing is contending for it
+        self._lock = anyio.Lock(fast_acquire=True)
 
     async def restart(self, task_group: TaskGroup, action: Callable) -> None:
         """Cancel any running task and start *action* as the new task.
@@ -47,7 +47,7 @@ class AnyioSingleTask:
         """
         async with self._lock:
             previous = self._handle
-            self._handle = await task_group._task_group.start(_cancel_wrapper(action))  # type: ignore[attr-defined]  # noqa: SLF001
+            self._handle = await task_group.start(_cancel_wrapper(action))
             if previous is not None:
                 previous.cancel()
 
