@@ -38,10 +38,12 @@ if TYPE_CHECKING:
         WorkerContext,
     )
 
+    from .http1_connection import HTTP1Connection
+
 STREAM_ID = 1
 
 
-def _make_connection(config: Config) -> H11Connection | HttpToolsConnection:
+def _make_connection(config: Config) -> HTTP1Connection:
     """Return the parser this config asks for.
 
     "auto" is h11, which is always present: it is a dependency in its own right,
@@ -103,7 +105,7 @@ class H11WSConnection:
     their_state = None
     trailing_data = (b"", False)
 
-    def __init__(self, h11_connection: H11Connection | HttpToolsConnection) -> None:
+    def __init__(self, h11_connection: HTTP1Connection) -> None:
         """Initialize with an existing h11 connection."""
         self.buffer = bytearray(h11_connection.trailing_data[0])
         self.h11_connection = h11_connection
@@ -148,9 +150,7 @@ class H11Protocol:
         self.can_read = context.event_class()
         self.client = client
         self.config = config
-        self.connection: H11Connection | H11WSConnection | HttpToolsConnection = _make_connection(
-            self.config
-        )
+        self.connection: HTTP1Connection | H11WSConnection = _make_connection(self.config)
         self.context = context
         self.keep_alive_requests = 0
         self.send = send
@@ -280,9 +280,7 @@ class H11Protocol:
                 STREAM_ID,
                 self.tls,
             )
-            self.connection = H11WSConnection(
-                cast("H11Connection | HttpToolsConnection", self.connection)
-            )
+            self.connection = H11WSConnection(cast("HTTP1Connection", self.connection))
         else:
             self.stream = HTTPStream(
                 self.app,

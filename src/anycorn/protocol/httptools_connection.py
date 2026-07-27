@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 from . import http1_events as http1
+from .http1_connection import HTTP1Connection
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -90,15 +91,15 @@ class _Callbacks:
         self.request_complete = True
 
 
-class HttpToolsConnection:
+class HttpToolsConnection(HTTP1Connection):
     """anycorn's HTTP/1.1 connection interface, implemented over httptools."""
 
     def __init__(self, max_incomplete_event_size: int) -> None:
         """Start a connection able to read one request at a time."""
-        self.our_state: http1.ConnectionState = http1.IDLE
-        self.their_state: http1.ConnectionState = http1.IDLE
-        self.they_are_waiting_for_100_continue = False
-        self.trailing_data: tuple[bytes, bool] = (b"", False)
+        self._our_state: http1.ConnectionState = http1.IDLE
+        self._their_state: http1.ConnectionState = http1.IDLE
+        self._they_are_waiting_for_100_continue = False
+        self._trailing_data: tuple[bytes, bool] = (b"", False)
 
         self._max_incomplete_event_size = max_incomplete_event_size
         self._method = b""
@@ -108,6 +109,26 @@ class HttpToolsConnection:
         self._chunked_response = False
         self._response_has_body = True
         self._start_cycle()
+
+    @property
+    def our_state(self) -> http1.ConnectionState:
+        """Return how far this side has got through the current response."""
+        return self._our_state
+
+    @property
+    def their_state(self) -> http1.ConnectionState:
+        """Return how far the peer has got through the current request."""
+        return self._their_state
+
+    @property
+    def they_are_waiting_for_100_continue(self) -> bool:
+        """Return True while the peer is holding a body back awaiting a 100."""
+        return self._they_are_waiting_for_100_continue
+
+    @property
+    def trailing_data(self) -> tuple[bytes, bool]:
+        """Return the bytes read but not consumed, for whoever takes over."""
+        return self._trailing_data
 
     def _start_cycle(self) -> None:
         self._callbacks = _Callbacks()
@@ -124,7 +145,7 @@ class HttpToolsConnection:
     def receive_data(self, data: bytes) -> None:
         """Feed *data* to the parser, or record the peer having hung up."""
         if data == b"":
-            self.their_state = http1.DONE if self._callbacks.request_complete else http1.ERROR
+            self._their_state = http1.DONE if self._callbacks.request_complete else http1.ERROR
             return
 
         self._buffer.extend(data)
@@ -207,16 +228,16 @@ class HttpToolsConnection:
         """Return the next h11 event, or NEED_DATA when the parser wants more."""
         callbacks = self._callbacks
         if self._error is not None:
-            self.their_state = http1.ERROR
+            self._their_state = http1.ERROR
             error, self._error = self._error, None
             raise error
-        if self.their_state is http1.ERROR:
+        if self._their_state is http1.ERROR:
             return http1.ConnectionClosed()
 
         if bytes(self._buffer[: len(_H2_PREFACE)]) == _H2_PREFACE:
             self._sent_request = True
-            self.their_state = http1.SEND_BODY
-            self.trailing_data = (bytes(self._buffer[len(_H2_PREFACE) :]), False)
+            self._their_state = http1.SEND_BODY
+            self._trailing_data = (bytes(self._buffer[len(_H2_PREFACE) :]), False)
             return http1.Request(
                 method=b"PRI",
                 target=b"*",
@@ -231,11 +252,11 @@ class HttpToolsConnection:
             self._method = self._parser.get_method().upper()
             self._their_http_version = self._parser.get_http_version().encode("ascii")
             self._keep_alive = bool(self._parser.should_keep_alive()) and not callbacks.wants_close
-            self.their_state = http1.SEND_BODY
-            self.trailing_data = (self._pipelined or self._upgrade_data, False)
+            self._their_state = http1.SEND_BODY
+            self._trailing_data = (self._pipelined or self._upgrade_data, False)
             # Raised here rather than on receipt: h11 only knows once it has handed
             # the request over, so the 100 follows the request rather than leading it
-            self.they_are_waiting_for_100_continue = (
+            self._they_are_waiting_for_100_continue = (
                 callbacks.expects_continue and not callbacks.request_complete
             )
             return http1.Request(
@@ -255,8 +276,8 @@ class HttpToolsConnection:
 
         if callbacks.request_complete and not self._sent_end_of_message:
             self._sent_end_of_message = True
-            self.they_are_waiting_for_100_continue = False
-            self.their_state = http1.DONE
+            self._they_are_waiting_for_100_continue = False
+            self._their_state = http1.DONE
             return http1.EndOfMessage()
 
         if self._pipelined:
@@ -271,13 +292,13 @@ class HttpToolsConnection:
     def send(self, event: http1.SendableEvent) -> bytes:  # noqa: PLR0911
         """Encode *event* the way h11 would, and advance our side of the state."""
         if isinstance(event, http1.InformationalResponse):
-            self.they_are_waiting_for_100_continue = False
+            self._they_are_waiting_for_100_continue = False
             return self._encode_head(event.status_code, event.headers, informational=True)
         if isinstance(event, http1.Response):
-            if self.our_state not in {http1.IDLE, http1.SEND_RESPONSE}:
-                msg = f"Cannot send a Response in state {self.our_state}"
+            if self._our_state not in {http1.IDLE, http1.SEND_RESPONSE}:
+                msg = f"Cannot send a Response in state {self._our_state}"
                 raise http1.LocalProtocolError(msg)
-            self.our_state = http1.SEND_BODY
+            self._our_state = http1.SEND_BODY
             return self._encode_head(event.status_code, event.headers, informational=False)
         if isinstance(event, http1.Data):
             if not self._response_has_body:
@@ -286,10 +307,10 @@ class HttpToolsConnection:
                 return b"%x\r\n%s\r\n" % (len(event.data), bytes(event.data))
             return bytes(event.data)
         if isinstance(event, http1.EndOfMessage):
-            if self.our_state is not http1.SEND_BODY:
-                msg = f"Cannot send EndOfMessage in state {self.our_state}"
+            if self._our_state is not http1.SEND_BODY:
+                msg = f"Cannot send EndOfMessage in state {self._our_state}"
                 raise http1.LocalProtocolError(msg)
-            self.our_state = http1.DONE if self._keep_alive else http1.MUST_CLOSE
+            self._our_state = http1.DONE if self._keep_alive else http1.MUST_CLOSE
             if self._chunked_response and self._response_has_body:
                 return b"0\r\n\r\n"
             return b""
@@ -346,12 +367,12 @@ class HttpToolsConnection:
 
     def start_next_cycle(self) -> None:
         """Ready the connection for the next request on it."""
-        if self.our_state is not http1.DONE or self.their_state is not http1.DONE:
-            msg = f"Cannot start a new cycle in states {self.our_state}, {self.their_state}"
+        if self._our_state is not http1.DONE or self._their_state is not http1.DONE:
+            msg = f"Cannot start a new cycle in states {self._our_state}, {self._their_state}"
             raise http1.LocalProtocolError(msg)
-        self.our_state = http1.IDLE
-        self.their_state = http1.IDLE
-        self.they_are_waiting_for_100_continue = False
+        self._our_state = http1.IDLE
+        self._their_state = http1.IDLE
+        self._they_are_waiting_for_100_continue = False
         pipelined, self._pipelined = self._pipelined, b""
         self._start_cycle()
         if pipelined:

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Literal
 import h11
 
 from . import http1_events as http1
+from .http1_connection import HTTP1Connection
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -36,7 +37,7 @@ def _state_map() -> dict[object, http1.ConnectionState]:
     }
 
 
-class H11Connection:
+class H11Connection(HTTP1Connection):
     """anycorn's HTTP/1.1 connection interface, implemented over h11."""
 
     def __init__(self, max_incomplete_event_size: int) -> None:

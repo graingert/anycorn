@@ -15,6 +15,7 @@ from anycorn.config import Config
 from anycorn.protocol import http1_events as http1
 from anycorn.protocol.h11 import _make_connection
 from anycorn.protocol.h11_connection import H11Connection
+from anycorn.protocol.http1_connection import HTTP1Connection
 from anycorn.protocol.httptools_connection import HttpToolsConnection
 
 GET = b"GET / HTTP/1.1\r\nHost: anycorn\r\n\r\n"
@@ -39,7 +40,7 @@ def _drive(connection: object, request: bytes | None, sends: list) -> tuple[list
     return events, b"".join(_encode(connection, event) for event in sends)
 
 
-def _next_request(connection: H11Connection | HttpToolsConnection) -> http1.Request:
+def _next_request(connection: HTTP1Connection) -> http1.Request:
     """Take the next event, which the caller expects to be a request."""
     event = connection.next_event()
     assert isinstance(event, http1.Request), f"expected a Request, got {event!r}"
@@ -205,6 +206,40 @@ def test_the_http2_preface_is_handed_over_as_a_request() -> None:
     assert event.target == b"*"
     assert event.http_version == b"2.0"
     assert connection.trailing_data[0] == b"SM\r\n\r\n"
+
+
+@pytest.mark.parametrize("parser", ["h11", "httptools", "auto"])
+def test_whichever_parser_is_chosen_implements_the_interface(parser: str) -> None:
+    """What H11Protocol is handed is an HTTP1Connection, not one of two known classes.
+
+    The interface is what makes the parser interchangeable, so it is worth pinning
+    that both really implement it - an abstract member left unimplemented does not
+    fail until something tries to build one.
+    """
+    config = Config()
+    config.http_parser = parser  # type: ignore[assignment]
+
+    assert isinstance(_make_connection(config), HTTP1Connection)
+
+
+def test_the_interface_covers_what_the_protocol_uses() -> None:
+    """Every public name on either implementation is one the interface declares.
+
+    A parser growing a public method of its own is how the two drift apart: the
+    protocol starts calling it, and the other parser has no answer. Anything the
+    protocol needs belongs on HTTP1Connection, where both must implement it.
+    """
+    declared = {name for name in vars(HTTP1Connection) if not name.startswith("_")}
+
+    for implementation in (H11Connection, HttpToolsConnection):
+        public = {
+            name
+            for klass in implementation.__mro__
+            if klass not in {object, HTTP1Connection}
+            for name in vars(klass)
+            if not name.startswith("_")
+        }
+        assert public <= declared, f"{implementation.__name__} has names the interface lacks"
 
 
 @pytest.mark.parametrize(
