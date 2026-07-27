@@ -22,7 +22,7 @@ from ssl import (
     create_default_context,
 )
 from time import time
-from typing import TYPE_CHECKING, Any, AnyStr, ClassVar
+from typing import TYPE_CHECKING, Any, AnyStr, ClassVar, Literal
 from wsgiref.handlers import format_date_time
 
 if sys.version_info >= (3, 11):
@@ -125,6 +125,9 @@ class Config:
     group: int | None = None
     h11_max_incomplete_size = 16 * 1024 * BYTES
     h11_pass_raw_headers = False
+    # Which parser reads HTTP/1.1 requests. "auto" is h11, which is always
+    # present because wsproto requires it; ask for httptools by name.
+    http_parser: Literal["auto", "h11", "httptools"] = "auto"
     h2_max_concurrent_streams = 100
     h2_max_header_list_size = 2**16
     h2_max_inbound_frame_size = 2**14 * OCTETS

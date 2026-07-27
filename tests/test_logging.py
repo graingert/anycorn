@@ -54,6 +54,14 @@ def test_access_logger_init(
         else:
             assert isinstance(logger.access_logger.handlers[0], expected_handler_type)
 
+    if logger.access_logger is not None:
+        # "anycorn.access" is a module-level logger, so a second Logger() replaces
+        # these rather than adding to them - leaving a FileHandler for the garbage
+        # collector to close at whatever point it happens to run
+        for handler in logger.access_logger.handlers:
+            handler.close()
+        logger.access_logger.handlers = []
+
 
 @pytest.mark.parametrize(
     ("level", "expected"),
