@@ -121,6 +121,15 @@ def _load_config(config_path: str | None) -> Config:
     type=click.Choice(("asyncio", "trio")),
 )
 @click.option(
+    "--http",
+    "http_parser",
+    help=(
+        "Which parser reads HTTP/1.1 requests. auto uses httptools when installed, "
+        "which is the faster of the two, and h11 otherwise."
+    ),
+    type=click.Choice(("auto", "h11", "httptools")),
+)
+@click.option(
     "--keep-alive",
     help="Seconds to keep inactive connections alive for",
     type=int,
@@ -244,6 +253,7 @@ def main(  # noqa: C901 PLR0913 PLR0912 PLR0915
     max_requests: int | None,
     max_requests_jitter: int | None,
     group: int | None,
+    http_parser: str | None,
     worker_class: str | None,
     keep_alive: int | None,
     keyfile: str | None,
@@ -321,6 +331,8 @@ def main(  # noqa: C901 PLR0913 PLR0912 PLR0915
         cfg.umask = umask
     if user is not None:
         cfg.user = user
+    if http_parser is not None:
+        cfg.http_parser = http_parser  # type: ignore[assignment]
     if worker_class is not None:
         cfg.worker_class = worker_class
     if verify_mode is not None:

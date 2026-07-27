@@ -8,6 +8,7 @@ import pytest
 import trustme
 
 import anycorn.config
+from anycorn.protocol.httptools_connection import httptools_available
 from anycorn.typing import ConnectionState, HTTPScope
 
 if TYPE_CHECKING:
@@ -28,6 +29,20 @@ class TLSCerts(NamedTuple):
 @pytest.fixture(autouse=True)
 def _time(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(anycorn.config, "time", lambda: 5000)
+
+
+@pytest.fixture(autouse=True, params=["h11", "httptools"])
+def http_parser(request: pytest.FixtureRequest, monkeypatch: MonkeyPatch) -> str:
+    """Run the whole suite against both HTTP/1.1 parsers.
+
+    The point of the httptools support is that nothing above the connection can
+    tell which one is in use, so the way to keep that true is to assert it of
+    every test rather than of a chosen few.
+    """
+    if request.param == "httptools" and not httptools_available():
+        pytest.skip("httptools is not installed")
+    monkeypatch.setattr(anycorn.config.Config, "http_parser", request.param)
+    return request.param
 
 
 @pytest.fixture(name="tls_certs", scope="session")

@@ -23,6 +23,7 @@ from .events import (
     Event as StreamEvent,
 )
 from .http_stream import HTTPStream
+from .httptools_connection import HttpToolsConnection, httptools_available
 from .ws_stream import WSStream
 
 if TYPE_CHECKING:
@@ -39,6 +40,26 @@ if TYPE_CHECKING:
     )
 
 STREAM_ID = 1
+
+
+def _make_connection(config: Config) -> h11.Connection | HttpToolsConnection:
+    """Return the parser this config asks for, falling back where it is not installed.
+
+    "auto" prefers httptools, which is the faster of the two; naming it explicitly
+    is an error when it is missing rather than a silent downgrade, since the point
+    of asking for it is to get it.
+    """
+    if config.http_parser == "httptools" or (
+        config.http_parser == "auto" and httptools_available()
+    ):
+        if not httptools_available():
+            msg = (
+                "http_parser is set to 'httptools' but httptools is not installed - "
+                "install anycorn[httptools], or leave http_parser as 'auto'"
+            )
+            raise RuntimeError(msg)
+        return HttpToolsConnection(config.h11_max_incomplete_size)
+    return h11.Connection(h11.SERVER, max_incomplete_event_size=config.h11_max_incomplete_size)
 
 
 class H2CProtocolRequiredError(Exception):
@@ -126,8 +147,8 @@ class H11Protocol:
         self.can_read = context.event_class()
         self.client = client
         self.config = config
-        self.connection: h11.Connection | H11WSConnection = h11.Connection(
-            h11.SERVER, max_incomplete_event_size=self.config.h11_max_incomplete_size
+        self.connection: h11.Connection | H11WSConnection | HttpToolsConnection = _make_connection(
+            self.config
         )
         self.context = context
         self.keep_alive_requests = 0

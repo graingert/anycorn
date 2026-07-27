@@ -49,9 +49,12 @@ dependencies = [
 h3 = [
     "aioquic >=1.2.0,<2.0.0",
 ]
+httptools = [
+    "httptools>=0.8.0",
+]
 [dependency-groups]
 test = [
-    "anycorn[h3]",
+    "anycorn[h3,httptools]",
     "httpx2",
     "pytest>=9.1.1",
     "mock",
@@ -108,3 +111,6 @@ line-length = 100
 
 [tool.ty.rules]
 unused-type-ignore-comment = "error"
+
+[tool.uv.sources]
+anycorn = { workspace = true }
