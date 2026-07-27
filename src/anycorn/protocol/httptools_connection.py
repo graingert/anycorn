@@ -18,7 +18,7 @@ cannot tell which parser answered.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from . import http1_events as http1
 
@@ -201,7 +201,9 @@ class HttpToolsConnection:
         """
         return _H2_PREFACE.startswith(bytes(self._buffer[: len(_H2_PREFACE)]))
 
-    def next_event(self) -> http1.ReceivableEvent | http1.Marker:  # noqa: PLR0911
+    def next_event(  # noqa: PLR0911
+        self,
+    ) -> http1.ReceivableEvent | Literal[http1.Marker.NEED_DATA, http1.Marker.PAUSED]:
         """Return the next h11 event, or NEED_DATA when the parser wants more."""
         callbacks = self._callbacks
         if self._error is not None:

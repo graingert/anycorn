@@ -12,7 +12,7 @@ h11's states onto the subset anycorn distinguishes.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import h11
 
@@ -70,7 +70,9 @@ class H11Connection:
         """Hand *data* to the parser."""
         self._connection.receive_data(data)
 
-    def next_event(self) -> http1.ReceivableEvent | http1.Marker:
+    def next_event(
+        self,
+    ) -> http1.ReceivableEvent | Literal[http1.Marker.NEED_DATA, http1.Marker.PAUSED]:
         """Return the next event, translated out of h11's vocabulary."""
         try:
             event = self._connection.next_event()
