@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from itertools import chain
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from anycorn.events import Closed, Event, RawData, Updated
 
@@ -112,7 +112,7 @@ class H11WSConnection:
         """Buffer incoming raw data."""
         self.buffer.extend(data)
 
-    def next_event(self) -> Data | object:
+    def next_event(self) -> Data | Literal[http1.Marker.NEED_DATA]:
         """Return buffered data as a Data event, or NEED_DATA if empty."""
         if self.buffer:
             event = Data(stream_id=STREAM_ID, data=bytes(self.buffer))
