@@ -21,7 +21,7 @@ from .events import (
 from .events import (
     Event as StreamEvent,
 )
-from .h11_connection import H11Connection, h11_available
+from .h11_connection import H11Connection
 from .http_stream import HTTPStream
 from .httptools_connection import HttpToolsConnection, httptools_available
 from .ws_stream import WSStream
@@ -42,40 +42,25 @@ STREAM_ID = 1
 
 
 def _make_connection(config: Config) -> H11Connection | HttpToolsConnection:
-    """Return the parser this config asks for, or say why it cannot.
+    """Return the parser this config asks for.
 
-    "auto" is h11, which is always there: wsproto requires it, so it arrives with
-    anycorn whether or not it is asked for, and defaulting to it means installing
-    httptools does not silently change how requests are parsed. Ask for httptools
-    by name to get it.
+    "auto" is h11, which is always present: it is a dependency in its own right,
+    and wsproto needs it as well. Defaulting to it means adding the httptools
+    extra is a decision rather than a side effect that silently changes how every
+    request is parsed - ask for httptools by name to get it.
 
-    Naming either explicitly is an error when it is missing rather than a silent
-    switch to the other, since the point of asking is to get that one.
+    Asking for httptools without it installed is an error rather than a silent
+    downgrade to h11, since the point of asking is to get it.
     """
     if config.http_parser == "httptools":
         if not httptools_available():
-            msg = _not_installed("httptools")
+            msg = (
+                "http_parser is set to 'httptools' but httptools is not installed - "
+                "install anycorn[httptools], or leave http_parser as 'auto'"
+            )
             raise RuntimeError(msg)
         return HttpToolsConnection(config.h11_max_incomplete_size)
-    if config.http_parser == "h11":
-        if not h11_available():
-            msg = _not_installed("h11")
-            raise RuntimeError(msg)
-        return H11Connection(config.h11_max_incomplete_size)
-
-    if h11_available():
-        return H11Connection(config.h11_max_incomplete_size)
-    if httptools_available():
-        return HttpToolsConnection(config.h11_max_incomplete_size)
-    msg = "no HTTP/1.1 parser is installed - install either h11 or httptools (anycorn[httptools])"
-    raise RuntimeError(msg)
-
-
-def _not_installed(parser: str) -> str:
-    return (
-        f"http_parser is set to {parser!r} but {parser} is not installed - "
-        f"install it, or leave http_parser as 'auto' to use whichever is present"
-    )
+    return H11Connection(config.h11_max_incomplete_size)
 
 
 class H2CProtocolRequiredError(Exception):

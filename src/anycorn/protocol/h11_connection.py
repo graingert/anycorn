@@ -1,7 +1,9 @@
 """The h11-backed connection, translating to anycorn's HTTP/1.1 vocabulary.
 
-This is the only module that imports h11, so a deployment running the httptools
-parser does not need h11 for anycorn's sake.
+This is the only module that imports h11. Not because h11 might be missing - it
+is a hard dependency, and wsproto requires it too - but so that the vocabulary
+the protocol speaks belongs to anycorn rather than to whichever parser happens to
+be reading the socket.
 
 The translation is thin by design: anycorn's vocabulary was taken from h11's, so
 this is mostly a matter of swapping one set of classes for another and mapping
@@ -12,23 +14,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import h11
+
 from . import http1_events as http1
-
-try:
-    import h11
-except ImportError:  # pragma: no cover - exercised by not installing h11
-    h11 = None  # type: ignore[assignment]
-
-
-def h11_available() -> bool:
-    """Return True when h11 can be used as the HTTP/1.1 parser."""
-    return h11 is not None
-
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-    # Only for annotations, so this costs nothing when h11 is absent
     from h11 import Event as H11Event
 
 
@@ -49,9 +41,6 @@ class H11Connection:
 
     def __init__(self, max_incomplete_event_size: int) -> None:
         """Start a server-side h11 connection with the configured header limit."""
-        if h11 is None:  # pragma: no cover - guarded by the caller
-            msg = "h11 is not installed"
-            raise RuntimeError(msg)
         self._connection = h11.Connection(
             h11.SERVER, max_incomplete_event_size=max_incomplete_event_size
         )

@@ -240,32 +240,3 @@ def test_auto_uses_h11_even_with_httptools_installed() -> None:
     config.http_parser = "auto"
 
     assert isinstance(_make_connection(config), H11Connection)
-
-
-def test_asking_for_h11_without_it_installed_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The mirror of the httptools case: named explicitly, so it is not substituted."""
-    monkeypatch.setattr("anycorn.protocol.h11.h11_available", lambda: False)
-    config = Config()
-    config.http_parser = "h11"
-
-    with pytest.raises(RuntimeError, match="h11 is not installed"):
-        _make_connection(config)
-
-
-def test_auto_falls_back_to_httptools_without_h11(monkeypatch: pytest.MonkeyPatch) -> None:
-    """h11 is preferred but not required: auto takes httptools when it is alone."""
-    monkeypatch.setattr("anycorn.protocol.h11.h11_available", lambda: False)
-    config = Config()
-    config.http_parser = "auto"
-
-    assert isinstance(_make_connection(config), HttpToolsConnection)
-
-
-def test_with_neither_parser_installed_it_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("anycorn.protocol.h11.h11_available", lambda: False)
-    monkeypatch.setattr("anycorn.protocol.h11.httptools_available", lambda: False)
-    config = Config()
-    config.http_parser = "auto"
-
-    with pytest.raises(RuntimeError, match=r"no HTTP/1\.1 parser is installed"):
-        _make_connection(config)
