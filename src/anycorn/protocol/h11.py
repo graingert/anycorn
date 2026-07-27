@@ -5,10 +5,9 @@ from __future__ import annotations
 from itertools import chain
 from typing import TYPE_CHECKING, cast
 
-import h11
-
 from anycorn.events import Closed, Event, RawData, Updated
 
+from . import http1_events as http1
 from .events import (
     Body,
     Data,
@@ -22,6 +21,7 @@ from .events import (
 from .events import (
     Event as StreamEvent,
 )
+from .h11_connection import H11Connection, h11_available
 from .http_stream import HTTPStream
 from .httptools_connection import HttpToolsConnection, httptools_available
 from .ws_stream import WSStream
@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from anycorn.typing import (
         AppWrapper,
         ConnectionState,
-        H11SendableEvent,
         TaskGroup,
         TLSExtension,
         WorkerContext,
@@ -42,30 +41,43 @@ if TYPE_CHECKING:
 STREAM_ID = 1
 
 
-def _make_connection(config: Config) -> h11.Connection | HttpToolsConnection:
-    """Return the parser this config asks for, falling back where it is not installed.
+def _make_connection(config: Config) -> H11Connection | HttpToolsConnection:
+    """Return the parser this config asks for, or say why it cannot.
 
-    "auto" prefers httptools, which is the faster of the two; naming it explicitly
-    is an error when it is missing rather than a silent downgrade, since the point
-    of asking for it is to get it.
+    "auto" prefers httptools, which is the faster of the two, and falls back to
+    h11. Naming either explicitly is an error when it is missing rather than a
+    silent switch to the other, since the point of asking is to get that one.
     """
-    if config.http_parser == "httptools" or (
-        config.http_parser == "auto" and httptools_available()
-    ):
+    if config.http_parser == "httptools":
         if not httptools_available():
-            msg = (
-                "http_parser is set to 'httptools' but httptools is not installed - "
-                "install anycorn[httptools], or leave http_parser as 'auto'"
-            )
+            msg = _not_installed("httptools")
             raise RuntimeError(msg)
         return HttpToolsConnection(config.h11_max_incomplete_size)
-    return h11.Connection(h11.SERVER, max_incomplete_event_size=config.h11_max_incomplete_size)
+    if config.http_parser == "h11":
+        if not h11_available():
+            msg = _not_installed("h11")
+            raise RuntimeError(msg)
+        return H11Connection(config.h11_max_incomplete_size)
+
+    if httptools_available():
+        return HttpToolsConnection(config.h11_max_incomplete_size)
+    if h11_available():
+        return H11Connection(config.h11_max_incomplete_size)
+    msg = "no HTTP/1.1 parser is installed - install either h11 or httptools (anycorn[httptools])"
+    raise RuntimeError(msg)
+
+
+def _not_installed(parser: str) -> str:
+    return (
+        f"http_parser is set to {parser!r} but {parser} is not installed - "
+        f"install it, or leave http_parser as 'auto' to use whichever is present"
+    )
 
 
 class H2CProtocolRequiredError(Exception):
     """Raised when the client requests an upgrade to HTTP/2 cleartext (h2c)."""
 
-    def __init__(self, data: bytes, request: h11.Request) -> None:
+    def __init__(self, data: bytes, request: http1.Request) -> None:
         """Initialize with the buffered data and original request."""
         settings = ""
         headers = [(b":method", request.method), (b":path", request.target)]
@@ -102,7 +114,7 @@ class H11WSConnection:
     their_state = None
     trailing_data = (b"", False)
 
-    def __init__(self, h11_connection: h11.Connection) -> None:
+    def __init__(self, h11_connection: H11Connection | HttpToolsConnection) -> None:
         """Initialize with an existing h11 connection."""
         self.buffer = bytearray(h11_connection.trailing_data[0])
         self.h11_connection = h11_connection
@@ -111,15 +123,15 @@ class H11WSConnection:
         """Buffer incoming raw data."""
         self.buffer.extend(data)
 
-    def next_event(self) -> Data | type[h11.NEED_DATA]:
+    def next_event(self) -> Data | object:
         """Return buffered data as a Data event, or NEED_DATA if empty."""
         if self.buffer:
             event = Data(stream_id=STREAM_ID, data=bytes(self.buffer))
             self.buffer = bytearray()
             return event
-        return h11.NEED_DATA
+        return http1.NEED_DATA
 
-    def send(self, event: H11SendableEvent) -> bytes:
+    def send(self, event: http1.SendableEvent) -> bytes:
         """Encode and return an h11 event as bytes."""
         return self.h11_connection.send(event)
 
@@ -147,7 +159,7 @@ class H11Protocol:
         self.can_read = context.event_class()
         self.client = client
         self.config = config
-        self.connection: h11.Connection | H11WSConnection | HttpToolsConnection = _make_connection(
+        self.connection: H11Connection | H11WSConnection | HttpToolsConnection = _make_connection(
             self.config
         )
         self.context = context
@@ -179,14 +191,14 @@ class H11Protocol:
                 if self.keep_alive_requests >= self.config.keep_alive_max_requests:
                     headers.append((b"connection", b"close"))
                 await self._send_h11_event(
-                    h11.Response(
+                    http1.Response(
                         headers=headers,
                         status_code=event.status_code,
                     )
                 )
             else:
                 await self._send_h11_event(
-                    h11.InformationalResponse(
+                    http1.InformationalResponse(
                         headers=list(chain(event.headers, self.config.response_headers("h11"))),
                         status_code=event.status_code,
                     )
@@ -194,9 +206,9 @@ class H11Protocol:
         elif isinstance(event, InformationalResponse):
             pass  # Ignore for HTTP/1
         elif isinstance(event, Body):
-            await self._send_h11_event(h11.Data(data=event.data))
+            await self._send_h11_event(http1.Data(data=event.data))
         elif isinstance(event, EndBody):
-            await self._send_h11_event(h11.EndOfMessage())
+            await self._send_h11_event(http1.EndOfMessage())
         elif isinstance(event, Data):
             await self.send(RawData(data=event.data))
         elif isinstance(event, EndData):
@@ -208,15 +220,15 @@ class H11Protocol:
         while True:
             if self.connection.they_are_waiting_for_100_continue:
                 await self._send_h11_event(
-                    h11.InformationalResponse(
+                    http1.InformationalResponse(
                         status_code=100, headers=self.config.response_headers("h11")
                     )
                 )
 
             try:
                 event = self.connection.next_event()
-            except h11.RemoteProtocolError as error:
-                if self.connection.our_state in {h11.IDLE, h11.SEND_RESPONSE}:
+            except http1.RemoteProtocolError as error:
+                if self.connection.our_state in {http1.IDLE, http1.SEND_RESPONSE}:
                     # Log it: the status (e.g. 431 for oversized headers) otherwise
                     # goes out with no record of why the request was rejected, which
                     # is a client-side problem but an opaque one to debug.
@@ -231,28 +243,28 @@ class H11Protocol:
                 await self.send(Closed())
                 break
             else:
-                if isinstance(event, h11.Request):
+                if isinstance(event, http1.Request):
                     await self.send(Updated(idle=False))
                     await self._check_protocol(event)
                     await self._create_stream(event)
-                elif event is h11.PAUSED:
+                elif event is http1.PAUSED:
                     await self.can_read.clear()
                     await self.can_read.wait()
                 elif (
-                    isinstance(event, h11.ConnectionClosed)
-                    or event is h11.NEED_DATA
+                    isinstance(event, http1.ConnectionClosed)
+                    or event is http1.NEED_DATA
                     or self.stream is None
                 ):
                     break
-                elif isinstance(event, h11.Data):
+                elif isinstance(event, http1.Data):
                     await self.stream.handle(Body(stream_id=STREAM_ID, data=event.data))
-                elif isinstance(event, h11.EndOfMessage):
+                elif isinstance(event, http1.EndOfMessage):
                     await self.stream.handle(EndBody(stream_id=STREAM_ID))
                 elif isinstance(event, Data):
                     # WebSocket pass through
                     await self.stream.handle(event)
 
-    async def _create_stream(self, request: h11.Request) -> None:
+    async def _create_stream(self, request: http1.Request) -> None:
         upgrade_value = ""
         connection_value = ""
         for name, value in request.headers:
@@ -279,7 +291,9 @@ class H11Protocol:
                 STREAM_ID,
                 self.tls,
             )
-            self.connection = H11WSConnection(cast("h11.Connection", self.connection))
+            self.connection = H11WSConnection(
+                cast("H11Connection | HttpToolsConnection", self.connection)
+            )
         else:
             self.stream = HTTPStream(
                 self.app,
@@ -311,18 +325,18 @@ class H11Protocol:
         self.keep_alive_requests += 1
         await self.context.mark_request()
 
-    async def _send_h11_event(self, event: H11SendableEvent) -> None:
+    async def _send_h11_event(self, event: http1.SendableEvent) -> None:
         try:
             data = self.connection.send(event)
-        except h11.LocalProtocolError:
-            if self.connection.their_state != h11.ERROR:
+        except http1.LocalProtocolError:
+            if self.connection.their_state != http1.ERROR:
                 raise
         else:
             await self.send(RawData(data=data))
 
     async def _send_error_response(self, status_code: int) -> None:
         await self._send_h11_event(
-            h11.Response(
+            http1.Response(
                 status_code=status_code,
                 headers=list(
                     chain(
@@ -332,19 +346,19 @@ class H11Protocol:
                 ),
             )
         )
-        await self._send_h11_event(h11.EndOfMessage())
+        await self._send_h11_event(http1.EndOfMessage())
 
     async def _maybe_recycle(self) -> None:
         await self._close_stream()
         if (
             not self.context.terminated.is_set()
-            and self.connection.our_state is h11.DONE
-            and self.connection.their_state is h11.DONE
+            and self.connection.our_state is http1.DONE
+            and self.connection.their_state is http1.DONE
             and self.keep_alive_requests <= self.config.keep_alive_max_requests
         ):
             try:
                 self.connection.start_next_cycle()
-            except h11.LocalProtocolError:
+            except http1.LocalProtocolError:
                 await self.send(Closed())
             else:
                 self.response = None
@@ -360,7 +374,7 @@ class H11Protocol:
             await self.stream.handle(StreamClosed(stream_id=STREAM_ID))
             self.stream = None
 
-    async def _check_protocol(self, event: h11.Request) -> None:
+    async def _check_protocol(self, event: http1.Request) -> None:
         upgrade_value = ""
         has_body = False
         for name, value in event.headers:
@@ -377,7 +391,7 @@ class H11Protocol:
         # initiate the upgrade if really required (or just use h2).
         if upgrade_value.lower() == "h2c" and not has_body:
             await self._send_h11_event(
-                h11.InformationalResponse(
+                http1.InformationalResponse(
                     status_code=101,
                     headers=[
                         *self.config.response_headers("h11"),

@@ -15,8 +15,6 @@ from typing import (
     TypedDict,
 )
 
-import h11
-
 from .config import Config, Sockets
 
 if TYPE_CHECKING:
@@ -28,8 +26,6 @@ if sys.version_info >= (3, 11):
     from typing import NotRequired, Self
 else:
     from typing_extensions import NotRequired, Self
-
-H11SendableEvent = h11.Data | h11.EndOfMessage | h11.InformationalResponse | h11.Response
 
 WorkerFunc = Callable[[Config, Sockets | None, EventType | None], None]
 

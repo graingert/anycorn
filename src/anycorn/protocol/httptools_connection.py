@@ -1,4 +1,4 @@
-"""An h11.Connection work-alike that parses with httptools.
+"""The HTTP/1.1 connection, parsed by httptools.
 
 httptools wraps llhttp, the parser Node uses, and is markedly faster than h11 at
 reading requests - but it only reads them. Everything else h11 does for us, the
@@ -6,21 +6,21 @@ state machine and the response encoding, has to be supplied here.
 
 What this deliberately does *not* do is add a second HTTP/1.1 protocol
 implementation. `H11Protocol` already talks to its connection through a small
-interface - it holds `h11.Connection | H11WSConnection` and swaps one for the
+interface - it holds a connection and swaps it for `H11WSConnection` on the
 other on a websocket upgrade - so a third implementation of that interface leaves
 keep-alive, the websocket upgrade, the h2c upgrade and 100-continue handling
 exactly where they are, with one code path rather than two.
 
-For the same reason the events emitted here are h11's own, and the states are
-h11's sentinels: `H11Protocol` compares against `h11.DONE` and reads
-`event.headers`, and none of that should have to care which parser produced them.
+The events and states are anycorn's own (`http1_events`), which are h11's design
+under different names - so this module needs no h11 at all, and `H11Protocol`
+cannot tell which parser answered.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-import h11
+from . import http1_events as http1
 
 try:
     import httptools
@@ -32,9 +32,6 @@ def httptools_available() -> bool:
     """Return True when the optional httptools dependency can be used."""
     return httptools is not None
 
-
-if TYPE_CHECKING:
-    from anycorn.typing import H11SendableEvent
 
 # What h11 reports for a request whose framing we cannot honour
 _BAD_REQUEST = 400
@@ -91,12 +88,12 @@ class _Callbacks:
 
 
 class HttpToolsConnection:
-    """The slice of `h11.Connection` that `H11Protocol` uses, parsed by httptools."""
+    """anycorn's HTTP/1.1 connection interface, implemented over httptools."""
 
     def __init__(self, max_incomplete_event_size: int) -> None:
         """Start a connection able to read one request at a time."""
-        self.our_state: Any = h11.IDLE
-        self.their_state: Any = h11.IDLE
+        self.our_state: Any = http1.IDLE
+        self.their_state: Any = http1.IDLE
         self.they_are_waiting_for_100_continue = False
         self.trailing_data: tuple[bytes, bool] = (b"", False)
 
@@ -117,14 +114,14 @@ class HttpToolsConnection:
         self._sent_end_of_message = False
         self._upgrade_data = b""
         self._pipelined = b""
-        self._error: h11.RemoteProtocolError | None = None
+        self._error: http1.RemoteProtocolError | None = None
 
     # -- receiving -----------------------------------------------------------
 
     def receive_data(self, data: bytes) -> None:
         """Feed *data* to the parser, or record the peer having hung up."""
         if data == b"":
-            self.their_state = h11.DONE if self._callbacks.request_complete else h11.ERROR
+            self.their_state = http1.DONE if self._callbacks.request_complete else http1.ERROR
             return
 
         self._buffer.extend(data)
@@ -205,94 +202,99 @@ class HttpToolsConnection:
         """Return the next h11 event, or NEED_DATA when the parser wants more."""
         callbacks = self._callbacks
         if self._error is not None:
-            self.their_state = h11.ERROR
+            self.their_state = http1.ERROR
             error, self._error = self._error, None
             raise error
-        if self.their_state is h11.ERROR:
-            return h11.ConnectionClosed()
+        if self.their_state is http1.ERROR:
+            return http1.ConnectionClosed()
 
         if bytes(self._buffer[: len(_H2_PREFACE)]) == _H2_PREFACE:
             self._sent_request = True
-            self.their_state = h11.SEND_BODY
+            self.their_state = http1.SEND_BODY
             self.trailing_data = (bytes(self._buffer[len(_H2_PREFACE) :]), False)
-            return h11.Request(method=b"PRI", target=b"*", headers=[], http_version=b"2.0")
+            return http1.Request(
+                method=b"PRI",
+                target=b"*",
+                headers=http1.Headers([]),
+                http_version=b"2.0",
+            )
         if self._h2_preface_pending():
-            return h11.NEED_DATA
+            return http1.NEED_DATA
 
         if callbacks.headers_complete and not self._sent_request:
             self._sent_request = True
             self._method = self._parser.get_method().upper()
             self._their_http_version = self._parser.get_http_version().encode("ascii")
             self._keep_alive = bool(self._parser.should_keep_alive()) and not callbacks.wants_close
-            self.their_state = h11.SEND_BODY
+            self.their_state = http1.SEND_BODY
             self.trailing_data = (self._pipelined or self._upgrade_data, False)
             # Raised here rather than on receipt: h11 only knows once it has handed
             # the request over, so the 100 follows the request rather than leading it
             self.they_are_waiting_for_100_continue = (
                 callbacks.expects_continue and not callbacks.request_complete
             )
-            return h11.Request(
+            return http1.Request(
                 method=self._method,
                 target=callbacks.url,
-                headers=callbacks.headers,
+                headers=http1.Headers(callbacks.headers),
                 http_version=self._their_http_version,
             )
 
         if not self._sent_request:
-            return h11.NEED_DATA
+            return http1.NEED_DATA
 
         if callbacks.body:
             data = bytes(callbacks.body)
             callbacks.body.clear()
-            return h11.Data(data=data)
+            return http1.Data(data=data)
 
         if callbacks.request_complete and not self._sent_end_of_message:
             self._sent_end_of_message = True
             self.they_are_waiting_for_100_continue = False
-            self.their_state = h11.DONE
-            return h11.EndOfMessage()
+            self.their_state = http1.DONE
+            return http1.EndOfMessage()
 
         if self._pipelined:
             # Another request is already buffered; h11 pauses here rather than
             # reading ahead, and H11Protocol waits on can_read for the recycle
-            return h11.PAUSED
+            return http1.PAUSED
 
-        return h11.NEED_DATA
+        return http1.NEED_DATA
 
     # -- sending -------------------------------------------------------------
 
-    def send(self, event: H11SendableEvent) -> bytes:  # noqa: PLR0911
+    def send(self, event: http1.SendableEvent) -> bytes:  # noqa: PLR0911
         """Encode *event* the way h11 would, and advance our side of the state."""
-        if isinstance(event, h11.InformationalResponse):
+        if isinstance(event, http1.InformationalResponse):
             self.they_are_waiting_for_100_continue = False
             return self._encode_head(event.status_code, event.headers, informational=True)
-        if isinstance(event, h11.Response):
-            if self.our_state not in {h11.IDLE, h11.SEND_RESPONSE}:
+        if isinstance(event, http1.Response):
+            if self.our_state not in {http1.IDLE, http1.SEND_RESPONSE}:
                 msg = f"Cannot send a Response in state {self.our_state}"
-                raise h11.LocalProtocolError(msg)
-            self.our_state = h11.SEND_BODY
+                raise http1.LocalProtocolError(msg)
+            self.our_state = http1.SEND_BODY
             return self._encode_head(event.status_code, event.headers, informational=False)
-        if isinstance(event, h11.Data):
+        if isinstance(event, http1.Data):
             if not self._response_has_body:
                 return b""
             if self._chunked_response:
                 return b"%x\r\n%s\r\n" % (len(event.data), bytes(event.data))
             return bytes(event.data)
-        if isinstance(event, h11.EndOfMessage):
-            if self.our_state is not h11.SEND_BODY:
+        if isinstance(event, http1.EndOfMessage):
+            if self.our_state is not http1.SEND_BODY:
                 msg = f"Cannot send EndOfMessage in state {self.our_state}"
-                raise h11.LocalProtocolError(msg)
-            self.our_state = h11.DONE if self._keep_alive else h11.MUST_CLOSE
+                raise http1.LocalProtocolError(msg)
+            self.our_state = http1.DONE if self._keep_alive else http1.MUST_CLOSE
             if self._chunked_response and self._response_has_body:
                 return b"0\r\n\r\n"
             return b""
         msg = f"Cannot send {type(event).__name__}"
-        raise h11.LocalProtocolError(msg)
+        raise http1.LocalProtocolError(msg)
 
     def _encode_head(
         self,
         status_code: int,
-        headers: Any,  # noqa: ANN401 - h11.Headers: pairs, plus raw_items()
+        headers: Any,  # noqa: ANN401 - http1.Headers: pairs, plus raw_items()
         *,
         informational: bool,
     ) -> bytes:
@@ -339,11 +341,11 @@ class HttpToolsConnection:
 
     def start_next_cycle(self) -> None:
         """Ready the connection for the next request on it."""
-        if self.our_state is not h11.DONE or self.their_state is not h11.DONE:
+        if self.our_state is not http1.DONE or self.their_state is not http1.DONE:
             msg = f"Cannot start a new cycle in states {self.our_state}, {self.their_state}"
-            raise h11.LocalProtocolError(msg)
-        self.our_state = h11.IDLE
-        self.their_state = h11.IDLE
+            raise http1.LocalProtocolError(msg)
+        self.our_state = http1.IDLE
+        self.their_state = http1.IDLE
         self.they_are_waiting_for_100_continue = False
         pipelined, self._pipelined = self._pipelined, b""
         self._start_cycle()
@@ -369,9 +371,9 @@ def _framing_is_unknown_length(status_code: int, headers: Any) -> bool:  # noqa:
     return not any(name.lower() in {b"content-length", b"transfer-encoding"} for name, _ in headers)
 
 
-def _remote_error(message: str, status_hint: int) -> h11.RemoteProtocolError:
-    return h11.RemoteProtocolError(message, error_status_hint=status_hint)
+def _remote_error(message: str, status_hint: int) -> http1.RemoteProtocolError:
+    return http1.RemoteProtocolError(message, error_status_hint=status_hint)
 
 
-def _protocol_error(error: Exception) -> h11.RemoteProtocolError:
+def _protocol_error(error: Exception) -> http1.RemoteProtocolError:
     return _remote_error(str(error) or type(error).__name__, _BAD_REQUEST)
