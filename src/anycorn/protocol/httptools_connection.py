@@ -18,9 +18,12 @@ cannot tell which parser answered.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 from . import http1_events as http1
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 try:
     import httptools
@@ -92,8 +95,8 @@ class HttpToolsConnection:
 
     def __init__(self, max_incomplete_event_size: int) -> None:
         """Start a connection able to read one request at a time."""
-        self.our_state: Any = http1.IDLE
-        self.their_state: Any = http1.IDLE
+        self.our_state: http1.ConnectionState = http1.IDLE
+        self.their_state: http1.ConnectionState = http1.IDLE
         self.they_are_waiting_for_100_continue = False
         self.trailing_data: tuple[bytes, bool] = (b"", False)
 
@@ -198,7 +201,7 @@ class HttpToolsConnection:
         """
         return _H2_PREFACE.startswith(bytes(self._buffer[: len(_H2_PREFACE)]))
 
-    def next_event(self) -> Any:  # noqa: ANN401, PLR0911
+    def next_event(self) -> http1.ReceivableEvent | http1.Marker:  # noqa: PLR0911
         """Return the next h11 event, or NEED_DATA when the parser wants more."""
         callbacks = self._callbacks
         if self._error is not None:
@@ -294,7 +297,7 @@ class HttpToolsConnection:
     def _encode_head(
         self,
         status_code: int,
-        headers: Any,  # noqa: ANN401 - http1.Headers: pairs, plus raw_items()
+        headers: Iterable[tuple[bytes, bytes]],
         *,
         informational: bool,
     ) -> bytes:
@@ -353,10 +356,11 @@ class HttpToolsConnection:
             self.receive_data(pipelined)
 
 
-def _raw_items(headers: Any) -> list[tuple[bytes, bytes]]:  # noqa: ANN401
+def _raw_items(headers: Iterable[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
     """Return the headers with the case the caller wrote, as h11's writer does."""
-    raw_items = getattr(headers, "raw_items", None)
-    return list(raw_items()) if raw_items is not None else list(headers)
+    if isinstance(headers, http1.Headers):
+        return headers.raw_items()
+    return list(headers)
 
 
 def _allows_body(status_code: int) -> bool:
@@ -364,7 +368,7 @@ def _allows_body(status_code: int) -> bool:
     return not (status_code in _NO_BODY_STATUSES or status_code < _INFORMATIONAL)
 
 
-def _framing_is_unknown_length(status_code: int, headers: Any) -> bool:  # noqa: ANN401
+def _framing_is_unknown_length(status_code: int, headers: Iterable[tuple[bytes, bytes]]) -> bool:
     """Return True when the app gave no framing for a response that may have a body."""
     if not _allows_body(status_code):
         return False

@@ -125,8 +125,8 @@ class Config:
     group: int | None = None
     h11_max_incomplete_size = 16 * 1024 * BYTES
     h11_pass_raw_headers = False
-    # Which parser reads HTTP/1.1 requests. "auto" takes httptools when it is
-    # installed, since it is the faster of the two, and h11 otherwise.
+    # Which parser reads HTTP/1.1 requests. "auto" is h11, which is always
+    # present because wsproto requires it; ask for httptools by name.
     http_parser: Literal["auto", "h11", "httptools"] = "auto"
     h2_max_concurrent_streams = 100
     h2_max_header_list_size = 2**16

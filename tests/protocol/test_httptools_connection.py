@@ -39,6 +39,13 @@ def _drive(connection: object, request: bytes | None, sends: list) -> tuple[list
     return events, b"".join(_encode(connection, event) for event in sends)
 
 
+def _next_request(connection: H11Connection | HttpToolsConnection) -> http1.Request:
+    """Take the next event, which the caller expects to be a request."""
+    event = connection.next_event()
+    assert isinstance(event, http1.Request), f"expected a Request, got {event!r}"
+    return event
+
+
 def _encode(connection: object, event: object) -> bytes:
     try:
         return connection.send(event)  # type: ignore[attr-defined]
@@ -128,10 +135,13 @@ def test_reads_the_same_events_as_h11(request_bytes: bytes) -> None:
     theirs, _ = _drive(H11Connection(16 * 1024), request_bytes, [])
 
     assert [type(event).__name__ for event in mine] == [type(event).__name__ for event in theirs]
-    assert mine[0].method == theirs[0].method
-    assert mine[0].target == theirs[0].target
-    assert mine[0].http_version == theirs[0].http_version
-    assert list(mine[0].headers) == list(theirs[0].headers)
+    first_mine, first_theirs = mine[0], theirs[0]
+    assert isinstance(first_mine, http1.Request)
+    assert isinstance(first_theirs, http1.Request)
+    assert first_mine.method == first_theirs.method
+    assert first_mine.target == first_theirs.target
+    assert first_mine.http_version == first_theirs.http_version
+    assert list(first_mine.headers) == list(first_theirs.headers)
 
 
 def test_a_second_pipelined_request_pauses_rather_than_merging() -> None:
@@ -144,7 +154,7 @@ def test_a_second_pipelined_request_pauses_rather_than_merging() -> None:
     connection = HttpToolsConnection(16 * 1024)
     connection.receive_data(keep_alive + b"GET /second HTTP/1.1\r\nHost: a\r\n\r\n")
 
-    assert connection.next_event().target == b"/first"
+    assert _next_request(connection).target == b"/first"
     assert isinstance(connection.next_event(), http1.EndOfMessage)
     assert connection.next_event() is http1.PAUSED
 
@@ -153,14 +163,14 @@ def test_a_second_pipelined_request_pauses_rather_than_merging() -> None:
     connection.send(http1.EndOfMessage())
     connection.start_next_cycle()
 
-    assert connection.next_event().target == b"/second"
+    assert _next_request(connection).target == b"/second"
 
 
 def test_data_after_a_closing_request_is_an_error() -> None:
     """Which is what h11 answers, rather than treating it as the next request."""
     connection = HttpToolsConnection(16 * 1024)
     connection.receive_data(b"GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
-    assert connection.next_event().target == b"/"
+    assert _next_request(connection).target == b"/"
     assert isinstance(connection.next_event(), http1.EndOfMessage)
 
     connection.receive_data(b"some body")
@@ -189,7 +199,7 @@ def test_the_http2_preface_is_handed_over_as_a_request() -> None:
     connection = HttpToolsConnection(16 * 1024)
     connection.receive_data(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
 
-    event = connection.next_event()
+    event = _next_request(connection)
 
     assert event.method == b"PRI"
     assert event.target == b"*"
@@ -199,7 +209,7 @@ def test_the_http2_preface_is_handed_over_as_a_request() -> None:
 
 @pytest.mark.parametrize(
     ("parser", "expected"),
-    [("h11", H11Connection), ("httptools", HttpToolsConnection), ("auto", HttpToolsConnection)],
+    [("h11", H11Connection), ("httptools", HttpToolsConnection), ("auto", H11Connection)],
 )
 def test_the_config_chooses_the_parser(parser: str, expected: type) -> None:
     config = Config()
@@ -220,9 +230,12 @@ def test_asking_for_httptools_without_it_installed_is_an_error(
         _make_connection(config)
 
 
-def test_auto_falls_back_to_h11_without_httptools(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Auto is a preference, so it takes what is there."""
-    monkeypatch.setattr("anycorn.protocol.h11.httptools_available", lambda: False)
+def test_auto_uses_h11_even_with_httptools_installed() -> None:
+    """Installing httptools must not quietly change how requests are parsed.
+
+    h11 is present either way, since wsproto requires it, so preferring it means
+    adding the extra is a decision rather than a side effect.
+    """
     config = Config()
     config.http_parser = "auto"
 
@@ -240,7 +253,7 @@ def test_asking_for_h11_without_it_installed_is_an_error(monkeypatch: pytest.Mon
 
 
 def test_auto_falls_back_to_httptools_without_h11(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Neither parser is privileged: auto takes whichever is there."""
+    """h11 is preferred but not required: auto takes httptools when it is alone."""
     monkeypatch.setattr("anycorn.protocol.h11.h11_available", lambda: False)
     config = Config()
     config.http_parser = "auto"

@@ -44,9 +44,13 @@ STREAM_ID = 1
 def _make_connection(config: Config) -> H11Connection | HttpToolsConnection:
     """Return the parser this config asks for, or say why it cannot.
 
-    "auto" prefers httptools, which is the faster of the two, and falls back to
-    h11. Naming either explicitly is an error when it is missing rather than a
-    silent switch to the other, since the point of asking is to get that one.
+    "auto" is h11, which is always there: wsproto requires it, so it arrives with
+    anycorn whether or not it is asked for, and defaulting to it means installing
+    httptools does not silently change how requests are parsed. Ask for httptools
+    by name to get it.
+
+    Naming either explicitly is an error when it is missing rather than a silent
+    switch to the other, since the point of asking is to get that one.
     """
     if config.http_parser == "httptools":
         if not httptools_available():
@@ -59,10 +63,10 @@ def _make_connection(config: Config) -> H11Connection | HttpToolsConnection:
             raise RuntimeError(msg)
         return H11Connection(config.h11_max_incomplete_size)
 
-    if httptools_available():
-        return HttpToolsConnection(config.h11_max_incomplete_size)
     if h11_available():
         return H11Connection(config.h11_max_incomplete_size)
+    if httptools_available():
+        return HttpToolsConnection(config.h11_max_incomplete_size)
     msg = "no HTTP/1.1 parser is installed - install either h11 or httptools (anycorn[httptools])"
     raise RuntimeError(msg)
 

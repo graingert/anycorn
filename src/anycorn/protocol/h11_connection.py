@@ -1,7 +1,7 @@
 """The h11-backed connection, translating to anycorn's HTTP/1.1 vocabulary.
 
 This is the only module that imports h11, so a deployment running the httptools
-parser does not need h11 installed at all.
+parser does not need h11 for anycorn's sake.
 
 The translation is thin by design: anycorn's vocabulary was taken from h11's, so
 this is mostly a matter of swapping one set of classes for another and mapping
@@ -10,7 +10,7 @@ h11's states onto the subset anycorn distinguishes.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from . import http1_events as http1
 
@@ -28,8 +28,11 @@ def h11_available() -> bool:
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    # Only for annotations, so this costs nothing when h11 is absent
+    from h11 import Event as H11Event
 
-def _states() -> dict[Any, Any]:
+
+def _state_map() -> dict[object, http1.ConnectionState]:
     return {
         h11.IDLE: http1.IDLE,
         h11.SEND_RESPONSE: http1.SEND_RESPONSE,
@@ -52,17 +55,17 @@ class H11Connection:
         self._connection = h11.Connection(
             h11.SERVER, max_incomplete_event_size=max_incomplete_event_size
         )
-        self._state_map = _states()
+        self._states = _state_map()
 
     @property
-    def our_state(self) -> Any:  # noqa: ANN401
+    def our_state(self) -> http1.ConnectionState:
         """Return our side of the connection, in anycorn's terms."""
-        return self._state_map.get(self._connection.our_state, http1.ERROR)
+        return self._states.get(self._connection.our_state, http1.ERROR)
 
     @property
-    def their_state(self) -> Any:  # noqa: ANN401
+    def their_state(self) -> http1.ConnectionState:
         """Return the peer's side of the connection, in anycorn's terms."""
-        return self._state_map.get(self._connection.their_state, http1.ERROR)
+        return self._states.get(self._connection.their_state, http1.ERROR)
 
     @property
     def they_are_waiting_for_100_continue(self) -> bool:
@@ -78,7 +81,7 @@ class H11Connection:
         """Hand *data* to the parser."""
         self._connection.receive_data(data)
 
-    def next_event(self) -> Any:  # noqa: ANN401
+    def next_event(self) -> http1.ReceivableEvent | http1.Marker:
         """Return the next event, translated out of h11's vocabulary."""
         try:
             event = self._connection.next_event()
@@ -120,7 +123,7 @@ class H11Connection:
             raise http1.LocalProtocolError(str(error)) from error
 
 
-def _to_h11(event: http1.SendableEvent) -> Any:  # noqa: ANN401
+def _to_h11(event: http1.SendableEvent) -> H11Event:
     if isinstance(event, http1.Response):
         return h11.Response(status_code=event.status_code, headers=_pairs(event.headers))
     if isinstance(event, http1.InformationalResponse):
@@ -133,5 +136,6 @@ def _to_h11(event: http1.SendableEvent) -> Any:  # noqa: ANN401
 
 
 def _pairs(headers: Iterable[tuple[bytes, bytes]]) -> list[tuple[bytes, bytes]]:
-    raw_items = getattr(headers, "raw_items", None)
-    return list(raw_items()) if raw_items is not None else list(headers)
+    if isinstance(headers, http1.Headers):
+        return headers.raw_items()
+    return list(headers)

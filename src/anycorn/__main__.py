@@ -124,8 +124,8 @@ def _load_config(config_path: str | None) -> Config:
     "--http",
     "http_parser",
     help=(
-        "Which parser reads HTTP/1.1 requests. auto uses httptools when installed, "
-        "which is the faster of the two, and h11 otherwise."
+        "Which parser reads HTTP/1.1 requests. auto uses h11, which is always "
+        "installed; httptools is faster but must be asked for by name."
     ),
     type=click.Choice(("auto", "h11", "httptools")),
 )

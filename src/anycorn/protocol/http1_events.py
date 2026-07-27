@@ -13,37 +13,48 @@ than a reinterpretation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
 
-class _Sentinel:
-    """A named singleton, so states and markers show their name when printed."""
+class ConnectionState(Enum):
+    """How much of a request or response each side has got through.
 
-    __slots__ = ("_name",)
+    Only the states anycorn actually distinguishes are here; h11 has several more
+    that nothing above the connection ever looks at.
+    """
 
-    def __init__(self, name: str) -> None:
-        self._name = name
+    IDLE = auto()
+    SEND_RESPONSE = auto()
+    SEND_BODY = auto()
+    DONE = auto()
+    MUST_CLOSE = auto()
+    CLOSED = auto()
+    ERROR = auto()
 
-    def __repr__(self) -> str:
-        return self._name
+
+class Marker(Enum):
+    """Returned by `next_event()` in place of an event."""
+
+    NEED_DATA = auto()
+    PAUSED = auto()
 
 
-# Returned by next_event() rather than being events in their own right
-NEED_DATA = _Sentinel("NEED_DATA")
-PAUSED = _Sentinel("PAUSED")
+# Bound at module level so call sites read as they did against h11 - `http1.DONE`
+# rather than `http1.ConnectionState.DONE` - while still being properly typed
+IDLE = ConnectionState.IDLE
+SEND_RESPONSE = ConnectionState.SEND_RESPONSE
+SEND_BODY = ConnectionState.SEND_BODY
+DONE = ConnectionState.DONE
+MUST_CLOSE = ConnectionState.MUST_CLOSE
+CLOSED = ConnectionState.CLOSED
+ERROR = ConnectionState.ERROR
 
-# Connection states. Only the ones anycorn actually distinguishes are here;
-# h11 has a few more that nothing above the connection ever looks at.
-IDLE = _Sentinel("IDLE")
-SEND_RESPONSE = _Sentinel("SEND_RESPONSE")
-SEND_BODY = _Sentinel("SEND_BODY")
-DONE = _Sentinel("DONE")
-MUST_CLOSE = _Sentinel("MUST_CLOSE")
-CLOSED = _Sentinel("CLOSED")
-ERROR = _Sentinel("ERROR")
+NEED_DATA = Marker.NEED_DATA
+PAUSED = Marker.PAUSED
 
 
 class RemoteProtocolError(Exception):
@@ -145,4 +156,5 @@ class InformationalResponse:
     headers: Iterable[tuple[bytes, bytes]]
 
 
+ReceivableEvent = Request | Data | EndOfMessage | ConnectionClosed
 SendableEvent = Response | InformationalResponse | Data | EndOfMessage
