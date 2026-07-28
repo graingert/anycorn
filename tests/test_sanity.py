@@ -20,7 +20,13 @@ import wsproto.events
 
 from anycorn.config import Config
 
-from .helpers import SANITY_BODY, sanity_framework, serve_in_memory
+from .helpers import (
+    SANITY_BODY,
+    echoing_websocket_framework,
+    sanity_framework,
+    serve_in_memory,
+    serve_on_socket,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -425,3 +431,65 @@ async def test_http1_websocket_frame_arriving_with_the_handshake() -> None:
 
     assert isinstance(events[0], wsproto.events.AcceptConnection)
     assert events[-1] == wsproto.events.TextMessage(data="Hello & Goodbye")
+
+
+@pytest.mark.anyio
+async def test_rejecting_early_websocket_data_leaves_the_server_serving() -> None:
+    """Rejecting oversized early bytes costs the peer its connection, not the server.
+
+    The rejection and the app's accept - the app having been spawned before these bytes
+    were handled - answer the same h11 connection, and the 400 going out first consumed
+    the upgrade proposal the accept needed. h11 refused the 101, which left the
+    connection in ERROR, and the rejection then failed to finish and raised out of the
+    connection task, unwinding the worker and its listener with it: any peer could stop
+    the server by opening a handshake and sending more than it is willing to hold.
+
+    A real socket and a second client, because taking the listener down is what the bug
+    cost and neither the in-memory harness above nor one connection can show it.
+
+    It needs the app to be waiting in `receive()` when the rejection is written, which
+    is why `echoing_websocket_framework` is the app here rather than `sanity_framework`,
+    whose up-front accept beats the rejection and gets served. Given that, the accept
+    lands inside the write under both backends - the old code failed this 12 times out
+    of 12 on each - but it is still the scheduler's call, so the deterministic guard is
+    the one in test_h11.py and this is what a client and its neighbour see.
+    """
+    config = Config()
+    config.websocket_max_message_size = 4
+    async with serve_on_socket(echoing_websocket_framework, config) as (host, port):
+        client = wsproto.WSConnection(wsproto.ConnectionType.CLIENT)
+        handshake = client.send(wsproto.events.Request(host="anycorn", target="/"))
+        # As above: the frame a client that does not wait for the 101 puts on the wire
+        framer = wsproto.connection.Connection(wsproto.ConnectionType.CLIENT)
+        frame = framer.send(wsproto.events.BytesMessage(data=SANITY_BODY))
+
+        async with await anyio.connect_tcp(host, port) as stream:
+            await stream.send(handshake + frame)
+            rejection = bytearray()
+            with anyio.fail_after(5):
+                while b"\r\n\r\n" not in rejection:
+                    data = await stream.receive()
+                    assert data != b"", "the connection closed without an answer"
+                    rejection.extend(data)
+
+        assert bytes(rejection).startswith(b"HTTP/1.1 400 "), (
+            f"the handshake was not rejected, so nothing was tested: {bytes(rejection)[:40]!r}"
+        )
+
+        # The assertion that matters: the worker used to go down with that connection
+        async with await anyio.connect_tcp(host, port) as stream:
+            client = wsproto.WSConnection(wsproto.ConnectionType.CLIENT)
+            await stream.send(client.send(wsproto.events.Request(host="anycorn", target="/")))
+            events: list[object] = []
+            with anyio.fail_after(5):
+                while not any(isinstance(event, wsproto.events.BytesMessage) for event in events):
+                    data = await stream.receive()
+                    assert data != b"", "the server stopped serving"
+                    client.receive_data(data)
+                    for event in client.events():
+                        events.append(event)
+                        if isinstance(event, wsproto.events.AcceptConnection):
+                            await stream.send(client.send(wsproto.events.BytesMessage(data=b"ok")))
+
+    assert isinstance(events[0], wsproto.events.AcceptConnection)
+    assert events[-1] == wsproto.events.BytesMessage(data=b"ok")

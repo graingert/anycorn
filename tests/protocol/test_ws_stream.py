@@ -342,6 +342,47 @@ async def test_data_before_acceptance_is_bounded(stream: WSStream) -> None:
 
 
 @pytest.mark.anyio
+async def test_accept_racing_the_bound_rejection_is_dropped(stream: WSStream) -> None:
+    """An app that accepts while the rejection goes out must not answer as well.
+
+    Sending the rejection yields, and the app - spawned before these bytes arrived -
+    can accept in that window, putting a second answer on a handshake that has already
+    been answered. Over h11 that one is fatal to the worker, so the stream is closed
+    before the rejection is sent and app_send drops the accept; test_h11.py pins what
+    the connection does with the race.
+    """
+    stream.config.websocket_max_message_size = 4
+    await stream.handle(
+        Request(
+            stream_id=1,
+            http_version="2",
+            headers=[(b"sec-websocket-version", b"13")],
+            raw_path=b"/",
+            method="GET",
+            state=ConnectionState({}),
+        )
+    )
+    raced = []
+
+    async def send(event: object) -> None:
+        if isinstance(event, Response) and not raced:
+            raced.append(True)
+            await stream.app_send(cast("WebsocketAcceptEvent", {"type": "websocket.accept"}))
+
+    stream.send.side_effect = send  # type: ignore[attr-defined]
+
+    await stream.handle(Data(stream_id=1, data=b"toolong"))
+
+    assert raced, "the accept never raced the rejection, so nothing was tested"
+    assert [
+        event.status_code
+        for (event, *_), _ in stream.send.call_args_list  # type: ignore[attr-defined]
+        if isinstance(event, Response)
+    ] == [HTTPStatus.BAD_REQUEST]
+    assert stream.state == ASGIWebsocketState.HANDSHAKE
+
+
+@pytest.mark.anyio
 async def test_handle_connection(stream: WSStream) -> None:
     await stream.handle(
         Request(

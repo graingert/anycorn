@@ -316,8 +316,14 @@ class WSStream:
             # Bounded, since a peer that keeps sending at an app which is slow to
             # accept would otherwise have the buffer grow for as long as it likes.
             if len(self.pre_accept_data) + len(event.data) > self.config.websocket_max_message_size:
-                await self._send_error_response(400)
+                # Closed before the rejection is sent rather than after: sending it
+                # yields, and an app that accepts in that window would put a 101 on a
+                # connection whose upgrade proposal the 400 has already consumed. h11
+                # errors on it, which leaves the connection in ERROR, and the rejection
+                # then fails to finish and takes the worker down with it. Closing first
+                # means app_send drops that accept.
                 self.closed = True
+                await self._send_error_response(400)
             else:
                 self.pre_accept_data.extend(event.data)
         elif isinstance(event, (Body, Data)):

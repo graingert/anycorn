@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from contextlib import AsyncExitStack, asynccontextmanager
 from copy import deepcopy
+from functools import partial
 from json import dumps
 from math import inf
 from socket import AF_INET
@@ -15,6 +16,7 @@ import anyio.abc
 from anyio.abc import SocketAttribute
 from anyio.streams.tls import TLSAttribute
 
+from anycorn import serve
 from anycorn.app_wrappers import ASGIWrapper
 from anycorn.config import Config
 from anycorn.tcp_server import TCPServer
@@ -227,6 +229,57 @@ def capture_logs(config: Config) -> LogCapture:
     config.accesslog = _logger("access", captured.access)
     config.errorlog = _logger("error", captured.error)
     return captured
+
+
+@asynccontextmanager
+async def serve_on_socket(
+    app: Callable, config: Config | None = None
+) -> AsyncIterator[tuple[str, int]]:
+    """Run a worker on a real listening socket, yielding the address to connect to.
+
+    Where `serve_in_memory()` drives one `TCPServer` over a pair of memory streams,
+    this is the whole worker: a real listener on an ephemeral port, a connection per
+    client, and the task group that owns them - so a connection that fails badly enough
+    to unwind that task group takes the listener with it, and a second client can tell
+    you whether it did.
+
+    `serve()` reports its binds once the listeners are up, so there is nothing to wait
+    for on the way in. On the way out the server is cancelled, since a client that has
+    stopped talking is one it is entitled to wait on forever.
+    """
+    if config is None:
+        config = Config()
+    config.bind = ["127.0.0.1:0"]  # an ephemeral port, reported back by serve()
+    async with anyio.create_task_group() as task_group:
+        binds = await task_group.start(
+            partial(serve, app, config, shutdown_trigger=anyio.sleep_forever)
+        )
+        host, _, port = binds[0].removeprefix("http://").rpartition(":")
+        try:
+            yield host, int(port)
+        finally:
+            task_group.cancel_scope.cancel()
+
+
+async def echoing_websocket_framework(
+    scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable
+) -> None:
+    """Echo, accepting the way an app ordinarily does: read the connect, then accept.
+
+    `sanity_framework` sends its accept before its first `receive()`, which makes it the
+    first thing the app does and so beats anything else the server has yet to handle.
+    Tests about what happens to a connection an app has not accepted yet need an app
+    that accepts the way the specification has them do it.
+    """
+    assert scope["type"] == "websocket"
+    while True:
+        event = await receive()
+        if event["type"] == "websocket.connect":
+            await send({"type": "websocket.accept"})  # type: ignore[misc, arg-type]
+        elif event["type"] == "websocket.receive":
+            await send({"type": "websocket.send", "bytes": event["bytes"], "text": None})
+        elif event["type"] == "websocket.disconnect":
+            return
 
 
 async def empty_framework(scope: Scope, receive: Callable, send: Callable) -> None:

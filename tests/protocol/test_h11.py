@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import Mock, call
 
 import anyio
@@ -16,7 +16,7 @@ from anycorn.protocol.events import Body, Data, EndBody, EndData, Request, Respo
 from anycorn.protocol.h11 import H2CProtocolRequiredError, H2ProtocolAssumedError, H11Protocol
 from anycorn.protocol.http_stream import HTTPStream
 from anycorn.protocol.ws_stream import WSStream
-from anycorn.typing import ConnectionState
+from anycorn.typing import ConnectionState, WebsocketAcceptEvent
 from anycorn.typing import Event as IOEvent
 from anycorn.worker_context import EventWrapper
 from tests.helpers import capture_logs
@@ -500,6 +500,50 @@ async def test_protocol_handle_data_after_websocket_upgrade(protocol: H11Protoco
     assert sent == b"", "the trailing byte should be held, not answered"
     assert isinstance(protocol.stream, WSStream)
     assert protocol.stream.pre_accept_data == b"x"
+
+
+@pytest.mark.anyio
+async def test_protocol_websocket_rejection_racing_an_accept(protocol: H11Protocol) -> None:
+    """An accept that lands while a pre-accept rejection is going out must not crash.
+
+    Sending the 400 consumes h11's pending upgrade proposal, so the app's 101 - which
+    arrives during the write, the app having been spawned before these bytes were
+    handled - is rejected by h11 and leaves the connection in ERROR. The rejection's
+    own EndBody then raised out of the connection task and took the worker with it,
+    listener included: an unaccepted peer could stop the server by sending an upgrade
+    plus more than websocket_max_message_size of early bytes.
+    """
+    protocol.config.websocket_max_message_size = 4
+    request = (
+        b"GET / HTTP/1.1\r\n"
+        b"Host: anycorn\r\n"
+        b"Connection: Upgrade\r\n"
+        b"Upgrade: websocket\r\n"
+        b"Sec-WebSocket-Version: 13\r\n"
+        b"Sec-WebSocket-Key: bKdPyn3u98cTfZJSh4TNeQ==\r\n"
+        b"\r\n"
+        b"xxxxxxxx"  # more than the 4 bytes held for an app that has yet to accept
+    )
+    raced = []
+
+    async def send(event: object) -> None:
+        if isinstance(event, RawData) and event.data.startswith(b"HTTP/1.1 400") and not raced:
+            raced.append(True)
+            assert isinstance(protocol.stream, WSStream)
+            await protocol.stream.app_send(
+                cast("WebsocketAcceptEvent", {"type": "websocket.accept"})
+            )
+
+    protocol.send = AsyncMock(side_effect=send)
+
+    await protocol.handle(RawData(data=request))  # must not raise
+
+    assert raced, "the accept never raced the rejection, so nothing was tested"
+    sent = b"".join(
+        event.data for (event, *_), _ in protocol.send.call_args_list if isinstance(event, RawData)
+    )
+    assert b"HTTP/1.1 400 " in sent
+    assert b"101" not in sent, "the accept must not answer a handshake already rejected"
 
 
 @pytest.mark.anyio
