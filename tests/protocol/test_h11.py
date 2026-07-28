@@ -15,7 +15,6 @@ from anycorn.events import Closed, RawData, Updated
 from anycorn.protocol.events import Body, Data, EndBody, EndData, Request, Response, StreamClosed
 from anycorn.protocol.h11 import H2CProtocolRequiredError, H2ProtocolAssumedError, H11Protocol
 from anycorn.protocol.http_stream import HTTPStream
-from anycorn.protocol.ws_stream import WSStream
 from anycorn.typing import ConnectionState
 from anycorn.typing import Event as IOEvent
 from anycorn.worker_context import EventWrapper
@@ -466,16 +465,19 @@ async def test_protocol_handle_data_post_close(protocol: H11Protocol) -> None:
 
 @pytest.mark.anyio
 async def test_protocol_handle_data_after_websocket_upgrade(protocol: H11Protocol) -> None:
-    """Trailing data on a websocket upgrade must not crash the worker.
+    """Trailing data pipelined with a websocket upgrade is answered 400.
 
-    The bytes after the handshake arrive as a Data event before the app has
-    accepted the connection - while WSStream still has no wsproto connection
-    object to decode them with. Reading self.connection there raised
-    AttributeError and took the whole worker down with it.
+    The bytes after the handshake are pipelined in the same read as the upgrade
+    request, so they are sitting in the connection buffer before the app has had
+    any chance to accept. Whether the app had accepted by the time they were
+    handled used to come down to the event loop - asyncio ran the app first and
+    served them, trio did not and answered 400. They are answered 400 here now,
+    deterministically, before the app is spawned, rather than either served or
+    left to the scheduler.
 
-    They are held until the handshake resolves now, rather than answered, so
-    nothing is sent here: this app never accepts. What matters for the regression
-    is that handling them raises nothing.
+    This must not crash the worker: the regression it was first written for
+    (hypercorn#225) was an AttributeError from reading WSStream.connection before
+    the wsproto object existed. Answering 400 at the h11 layer never touches it.
 
     https://github.com/pgjones/hypercorn/issues/225
     """
@@ -497,9 +499,10 @@ async def test_protocol_handle_data_after_websocket_upgrade(protocol: H11Protoco
         for (event, *_), _ in protocol.send.call_args_list  # type: ignore[attr-defined]
         if isinstance(event, RawData)
     )
-    assert sent == b"", "the trailing byte should be held, not answered"
-    assert isinstance(protocol.stream, WSStream)
-    assert protocol.stream.pre_accept_data == b"x"
+    assert b"HTTP/1.1 400 " in sent, "the pipelined byte should be answered 400"
+    # Rejected at the h11 layer before a stream was handed the request, so the app
+    # was never spawned and there is no WSStream to have crashed on self.connection
+    assert protocol.stream is None
 
 
 @pytest.mark.anyio

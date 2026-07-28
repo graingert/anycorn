@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from http import HTTPStatus
 from typing import Any, cast
 from unittest.mock import Mock, call
 
 import anyio
 import anyio.lowlevel
 import pytest
-import wsproto.connection
-import wsproto.events
 from wsproto.events import BytesMessage, TextMessage
 
 from anycorn.config import Config
@@ -265,12 +262,12 @@ async def test_handle_request_tls() -> None:
 
 @pytest.mark.anyio
 async def test_handle_data_before_acceptance(stream: WSStream) -> None:
-    """Data arriving before the app accepts is held, not answered.
+    """Data arriving before the app accepts is answered 400, not served.
 
-    Whether the app has accepted by the time these bytes are handled is down to
-    the event loop - it had, under asyncio, and had not under trio, so the same
-    client got a 200 or a 400 depending on the backend. Holding them takes the
-    scheduler out of it; they are delivered once the handshake resolves.
+    Whether the app had accepted by the time these bytes were handled used to be
+    down to the event loop - it had, under asyncio, and had not under trio, so the
+    same client got a 200 or a 400 depending on the backend. RFC 6455 forbids
+    sending before the handshake completes, so they are answered 400 either way.
     """
     await stream.handle(
         Request(
@@ -284,46 +281,29 @@ async def test_handle_data_before_acceptance(stream: WSStream) -> None:
     )
     await stream.handle(Data(stream_id=1, data=b"X"))
 
-    assert stream.send.call_args_list == []  # type: ignore[attr-defined]
-    assert stream.pre_accept_data == b"X"
-    assert not stream.closed
+    assert stream.send.call_args_list == [  # type: ignore[attr-defined]
+        call(
+            Response(
+                stream_id=1,
+                headers=[(b"content-length", b"0"), (b"connection", b"close")],
+                status_code=400,
+            )
+        ),
+        call(EndBody(stream_id=1)),
+        call(StreamClosed(stream_id=1)),
+    ]
+    assert stream.closed
 
 
 @pytest.mark.anyio
-async def test_data_before_acceptance_is_delivered_once_accepted(stream: WSStream) -> None:
-    """The held bytes reach the app as soon as there is a connection to decode them."""
-    client = wsproto.connection.Connection(wsproto.ConnectionType.CLIENT)
-    frame = client.send(wsproto.events.BytesMessage(data=b"early"))
+async def test_accept_after_data_before_acceptance_does_not_send_a_101(stream: WSStream) -> None:
+    """An app that accepts after the 400 must not put a 101 on the closed connection.
 
-    await stream.handle(
-        Request(
-            stream_id=1,
-            http_version="1.1",
-            headers=[
-                (b"host", b"anycorn"),
-                (b"connection", b"upgrade"),
-                (b"upgrade", b"websocket"),
-                (b"sec-websocket-key", b"UnQ3lpJAH6j2PslA993iKQ=="),
-                (b"sec-websocket-version", b"13"),
-            ],
-            raw_path=b"/",
-            method="GET",
-            state=ConnectionState({}),
-        )
-    )
-    await stream.handle(Data(stream_id=1, data=frame))
-    await stream.app_send(cast("WebsocketAcceptEvent", {"type": "websocket.accept"}))
-
-    assert stream.pre_accept_data == b""
-    assert stream.app_put.call_args_list[-1] == call(  # type: ignore[attr-defined]
-        {"type": "websocket.receive", "bytes": b"early", "text": None}
-    )
-
-
-@pytest.mark.anyio
-async def test_data_before_acceptance_is_bounded(stream: WSStream) -> None:
-    """A peer that keeps sending at an app slow to accept is cut off, not buffered."""
-    stream.config.websocket_max_message_size = 4
+    The 400 sets closed before it is awaited, so an app racing to accept during
+    that await is turned away by app_send rather than reaching _accept and sending
+    a 101 switch onto a connection that has already answered 400 - which h11
+    rejects, taking the worker down.
+    """
     await stream.handle(
         Request(
             stream_id=1,
@@ -334,11 +314,14 @@ async def test_data_before_acceptance_is_bounded(stream: WSStream) -> None:
             state=ConnectionState({}),
         )
     )
+    await stream.handle(Data(stream_id=1, data=b"X"))
+    sent_after_400 = len(stream.send.call_args_list)  # type: ignore[attr-defined]
 
-    await stream.handle(Data(stream_id=1, data=b"toolong"))
+    await stream.app_send(cast("WebsocketAcceptEvent", {"type": "websocket.accept"}))
 
-    assert stream.closed
-    assert stream.send.call_args_list[0][0][0].status_code == HTTPStatus.BAD_REQUEST  # type: ignore[attr-defined]
+    # The accept was a no-op: nothing more went out, and in particular no 101
+    assert stream.send.call_args_list[sent_after_400:] == []  # type: ignore[attr-defined]
+    assert stream.state == ASGIWebsocketState.HANDSHAKE
 
 
 @pytest.mark.anyio

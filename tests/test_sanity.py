@@ -6,6 +6,7 @@ from the client side, so they cover the whole stack from bytes to ASGI and back.
 
 from __future__ import annotations
 
+from http import HTTPStatus
 from typing import TYPE_CHECKING, cast
 
 import anyio
@@ -394,16 +395,16 @@ async def test_http2_rejected_request_may_still_send_a_body() -> None:
 
 @pytest.mark.anyio
 async def test_http1_websocket_frame_arriving_with_the_handshake() -> None:
-    """A frame in the same packet as the upgrade is served, on either backend.
+    """A frame in the same packet as the upgrade is answered 400, on either backend.
 
-    Whether the app had accepted by the time these bytes were handled came down
-    to the event loop: asyncio ran the app first and served them, trio did not
-    and answered 400, so the same client got a different answer depending on how
-    the server was run. They are held until the handshake resolves now.
+    Whether the app had accepted by the time these bytes were handled used to come
+    down to the event loop: asyncio ran the app first and served them, trio did not
+    and answered 400, so the same client got a different answer depending on how the
+    server was run. RFC 6455 forbids sending before the handshake completes, so the
+    frame is answered 400 either way now - the answer is deterministic.
 
-    This shows the behaviour a client sees, but it cannot be the guard against
-    the old one coming back - the old one passed here about half the time, being
-    the race it was. test_ws_stream.py pins the holding itself, deterministically.
+    This shows the behaviour a client sees; test_ws_stream.py and test_h11.py pin
+    the rejection itself.
     """
     async with serve_in_memory(sanity_framework) as client_stream:
         client = wsproto.WSConnection(wsproto.ConnectionType.CLIENT)
@@ -417,11 +418,12 @@ async def test_http1_websocket_frame_arriving_with_the_handshake() -> None:
 
         events: list[object] = []
         with anyio.fail_after(5):
-            while not any(isinstance(event, wsproto.events.TextMessage) for event in events):
+            while not any(isinstance(event, wsproto.events.RejectConnection) for event in events):
                 data = await client_stream.receive_some(4096)
-                assert data != b"", "the connection was closed rather than served"
+                assert data != b"", "the connection was closed without an answer"
                 client.receive_data(data)
                 events.extend(client.events())
 
-    assert isinstance(events[0], wsproto.events.AcceptConnection)
-    assert events[-1] == wsproto.events.TextMessage(data="Hello & Goodbye")
+    reject = events[0]
+    assert isinstance(reject, wsproto.events.RejectConnection)
+    assert reject.status_code == HTTPStatus.BAD_REQUEST

@@ -2,27 +2,29 @@
 
 A client that writes its first frame without waiting for the handshake
 response puts the frame on the wire in the same breath as the upgrade. On the
-server that frame arrives as a Data event while WSStream is still in HANDSHAKE,
-before the app has accepted the connection. Whether the app had accepted by the
-time those bytes were handled used to come down to the event loop: asyncio ran
-the app task first and served the frame, trio did not and answered 400 - so the
-same client got a different answer depending on how the server was run.
+server those pipelined bytes are sitting in the connection buffer before the
+app has accepted. Whether the app had accepted by the time they were handled
+used to come down to the event loop: asyncio ran the app task first and served
+the frame, trio did not and answered 400 - so the same client got a different
+answer depending on how the server was run.
+
+RFC 6455 forbids a client sending before the handshake completes, so the frame
+is answered 400 now, deterministically, before the app is spawned - the answer
+no longer depends on the backend.
 
 Unlike the in-memory driver in tests/test_sanity.py, this drives a real,
 running anycorn server over a real TCP socket, connected client to server, so
 what is exercised is the whole stack down to the kernel's own scheduling of the
 two ends - which is the setting the race was actually reported in.
 
-This shows the behaviour a client sees. It cannot by itself be the guard
-against the old behaviour coming back: being the race it was, the old code
-passes it some fraction of the time. tests/protocol/test_ws_stream.py pins the
-holding itself, deterministically. What this adds is the end-to-end proof that,
-over a real socket, a frame sent ahead of the accept is served rather than
-sometimes met with a 400.
+tests/protocol/test_ws_stream.py and tests/protocol/test_h11.py pin the
+rejection itself; this adds the end-to-end proof that, over a real socket, a
+frame sent ahead of the accept is answered 400 on either backend.
 """
 
 from __future__ import annotations
 
+from http import HTTPStatus
 from urllib.parse import urlsplit
 
 import anyio
@@ -37,8 +39,8 @@ from tests.helpers import SANITY_BODY, sanity_framework
 
 
 @pytest.mark.anyio
-async def test_frame_sent_with_the_handshake_is_served_over_a_real_socket() -> None:
-    """A frame in the same write as the upgrade is served, on either backend."""
+async def test_frame_sent_with_the_handshake_is_rejected_over_a_real_socket() -> None:
+    """A frame in the same write as the upgrade is answered 400, on either backend."""
     config = Config()
     config.bind = ["127.0.0.1:0"]
     config.errorlog = "-"
@@ -72,13 +74,14 @@ async def test_frame_sent_with_the_handshake_is_served_over_a_real_socket() -> N
 
             events: list[object] = []
             with anyio.fail_after(5):
-                while not any(isinstance(e, wsproto.events.TextMessage) for e in events):
+                while not any(isinstance(e, wsproto.events.RejectConnection) for e in events):
                     data = await stream.receive()
-                    assert data != b"", "the connection was closed rather than served"
+                    assert data != b"", "the connection was closed without an answer"
                     client.receive_data(data)
                     events.extend(client.events())
 
         shutdown.set()
 
-    assert isinstance(events[0], wsproto.events.AcceptConnection)
-    assert events[-1] == wsproto.events.TextMessage(data="Hello & Goodbye")
+    reject = events[0]
+    assert isinstance(reject, wsproto.events.RejectConnection)
+    assert reject.status_code == HTTPStatus.BAD_REQUEST

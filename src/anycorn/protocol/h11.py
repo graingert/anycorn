@@ -259,6 +259,18 @@ class H11Protocol:
                 self.tls,
             )
             self.connection = H11WSConnection(cast("h11.Connection", self.connection))
+            if self.connection.buffer:
+                # The client pipelined bytes after the upgrade request, in the same
+                # read, before the handshake could complete. Whether the app had
+                # accepted by the time those bytes were handled used to come down to
+                # the event loop - asyncio ran the app first and served them, trio
+                # did not and answered 400. RFC 6455 forbids sending before the
+                # handshake completes, so answer 400 here, deterministically, before
+                # the app is spawned and given a chance to accept.
+                await self._send_error_response(400)
+                await self.send(Closed())
+                self.stream = None
+                return
         else:
             self.stream = HTTPStream(
                 self.app,

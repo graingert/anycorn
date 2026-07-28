@@ -1,5 +1,13 @@
 # Version history
 
+## Unreleased
+
+- Answer 400 for websocket data that arrives before the app accepts, on either
+  backend, rather than serving it once the handshake resolves. RFC 6455 forbids a
+  client sending before the handshake completes; the pipelined bytes are now
+  rejected deterministically, before the app is spawned. Supersedes the holding
+  behaviour added in 0.20.0.
+
 ## 0.20.0
 
 - Hold websocket data that arrives before the app accepts.
