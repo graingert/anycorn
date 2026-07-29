@@ -199,6 +199,42 @@ def _ended_quic() -> QuicConnection:
 
 
 @pytest.mark.anyio
+async def test_a_failing_connection_is_isolated_not_fatal(tmp_path: Path) -> None:
+    """An error handling one QUIC connection must not escape into UDPServer.run.
+
+    One UDP socket carries every connection, so an exception out of handle() would
+    unwind the receive loop and crash the whole worker. It must be contained: the
+    failing connection is torn down and forgotten, and handle() returns normally.
+    """
+    certfile, keyfile = _write_encrypted_cert(tmp_path)
+    config = Config()
+    config.certfile = certfile
+    config.keyfile = keyfile
+    config.keyfile_password = _KEY_PASSWORD
+    protocol = _protocol_for_initial(config, terminated=False)
+
+    # A real connection, created and registered exactly as a client Initial does.
+    await protocol.handle(RawData(data=_client_initial(), address=CLIENT_ADDRESS))
+    connection = next(iter(protocol.connections.values()))
+
+    # Now make handling its next datagram raise, as a bug in event handling would.
+    failing_quic = MagicMock()
+    failing_quic.next_event.side_effect = RuntimeError("boom in event handling")
+    failing_quic.datagrams_to_send.return_value = []
+    connection.quic = failing_quic
+
+    # A short-header datagram addressed to one of its connection ids routes to it.
+    cid = next(iter(connection.cids))
+    datagram = bytes([0x40]) + cid + b"\x00" * 30
+
+    # Must not raise - that is the whole point.
+    await protocol.handle(RawData(data=datagram, address=CLIENT_ADDRESS))
+
+    # The failing connection was torn down and forgotten; the server lives on.
+    assert protocol.connections == {}
+
+
+@pytest.mark.anyio
 async def test_handle_timer_skips_a_connection_that_has_ended(tmp_path: Path) -> None:
     """A timer left over from before the connection ended must not be handled.
 

@@ -14,11 +14,19 @@ from anycorn.config import Config
 from anycorn.tcp_server import TCPServer
 from anycorn.worker_context import WorkerContext
 
-from .helpers import SANITY_BODY, MemorySocketStream, memory_socket_stream_pair, sanity_framework
+from .helpers import (
+    SANITY_BODY,
+    MemorySocketStream,
+    capture_logs,
+    empty_framework,
+    memory_socket_stream_pair,
+    sanity_framework,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
+    from _pytest.monkeypatch import MonkeyPatch
     from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 
@@ -108,3 +116,41 @@ async def test_a_connection_whose_close_fails_does_not_crash_the_server() -> Non
     # The request was served, and the failing teardown did not take run() down with it
     assert statuses == [200]
     assert server_stream.aclose_called
+
+
+@pytest.mark.anyio
+async def test_unexpected_error_is_isolated_to_the_connection(monkeypatch: MonkeyPatch) -> None:
+    """An unexpected error handling one connection must not escape run().
+
+    run() is a task in the listener's task group; an exception escaping it would cancel
+    the sibling connections and unwind the worker. It must be logged and contained to
+    this connection instead. A protocol that raises stands in for any such fault.
+    """
+
+    class _ExplodingProtocol:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def initiate(self) -> None:
+            pass
+
+        async def handle(self, _event: object) -> None:
+            msg = "boom"
+            raise RuntimeError(msg)
+
+    monkeypatch.setattr("anycorn.tcp_server.ProtocolWrapper", _ExplodingProtocol)
+
+    config = Config()
+    logs = capture_logs(config)
+    client_stream, server_stream = memory_socket_stream_pair()
+    server = TCPServer(ASGIWrapper(empty_framework), config, WorkerContext(None), {}, server_stream)
+
+    async with client_stream:
+        # Reaching the assertion at all means the RuntimeError did not escape run() into
+        # this task group; had it, `async with` would re-raise it here.
+        with anyio.fail_after(5):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(server.run)
+                await client_stream.send_all(b"GET / HTTP/1.1\r\nhost: anycorn\r\n\r\n")
+
+    assert any("Error while handling connection" in line for line in logs.error)

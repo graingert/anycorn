@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import sys
 from math import inf
 from ssl import SSLZeroReturnError
 from typing import TYPE_CHECKING
@@ -10,6 +11,9 @@ from typing import TYPE_CHECKING
 import anyio
 import anyio.abc
 import anyio.streams.tls
+
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup
 
 from .events import Closed, Event, RawData, Updated
 from .protocol import ProtocolWrapper
@@ -81,6 +85,20 @@ class TCPServer:
                 await self._read_data()
         except OSError:
             pass
+        except anyio.get_cancelled_exc_class():
+            raise
+        except BaseExceptionGroup as error:
+            # An unexpected error while handling this connection (h11 or h2) must not
+            # unwind the listener's task group and take the whole worker down with it -
+            # asyncio's protocol model would isolate it, anyio's structured concurrency
+            # propagates it, so contain it here. Cancellation still has to reach the
+            # scope that raised it, so only a group with no cancellation is swallowed.
+            _, rest = error.split(anyio.get_cancelled_exc_class())
+            if rest is None:
+                raise
+            await self.config.log.exception("Error while handling connection")
+        except Exception:  # noqa: BLE001
+            await self.config.log.exception("Error while handling connection")
         finally:
             await self._close()
 

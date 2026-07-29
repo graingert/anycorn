@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import pathlib
+import sys
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
+
+import anyio
+
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup
 
 from aioquic.buffer import Buffer
 from aioquic.h3.connection import H3_ALPN, ErrorCode
@@ -133,9 +140,46 @@ class QuicProtocol:
 
             if connection is not None:
                 connection.quic.receive_datagram(event.data, event.address, now=self.context.time())
-                await self._handle_events(connection, event.address)
+                await self._safe_handle_events(connection, event.address)
         elif isinstance(event, Closed):
             pass
+
+    async def _safe_handle_events(
+        self, connection: _Connection, client: tuple[str, int] | None
+    ) -> None:
+        """Handle one connection's events, containing any failure to that connection.
+
+        One UDP socket carries every QUIC connection, so an exception escaping here
+        unwinds UDPServer.run and takes the whole worker down rather than the one
+        connection (asyncio's protocol model would isolate it; anyio's structured
+        concurrency propagates it). Log it, tear that connection down, and let the rest
+        carry on. Cancellation must still reach the scope that raised it.
+        """
+        try:
+            await self._handle_events(connection, client)
+        except anyio.get_cancelled_exc_class():
+            raise
+        except BaseExceptionGroup as error:
+            _, rest = error.split(anyio.get_cancelled_exc_class())
+            if rest is None:
+                raise
+            await self.config.log.exception("Error handling QUIC connection")
+            await self._abort_connection(connection)
+        except Exception:  # noqa: BLE001
+            await self.config.log.exception("Error handling QUIC connection")
+            await self._abort_connection(connection)
+
+    async def _abort_connection(self, connection: _Connection) -> None:
+        """Forget a connection whose handling failed, telling the peer where it can."""
+        await connection.task.stop()
+        for cid in connection.cids:
+            self.connections.pop(cid, None)
+        connection.cids = set()
+        # Best effort: the connection may be in any state, so a failure to send the
+        # close is nothing more to act on - the connection is already gone from us.
+        with contextlib.suppress(Exception):
+            connection.quic.close(error_code=ErrorCode.H3_INTERNAL_ERROR)
+            await self._flush_datagrams(connection)
 
     async def _flush_datagrams(self, connection: _Connection) -> None:
         """Write whatever the connection has queued out to the socket."""
@@ -235,4 +279,4 @@ class QuicProtocol:
         if connection.quic.get_timer() is None:
             return
         connection.quic.handle_timer(now=self.context.time())
-        await self._handle_events(connection, None)
+        await self._safe_handle_events(connection, None)
