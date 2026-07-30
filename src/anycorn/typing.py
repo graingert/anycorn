@@ -313,8 +313,44 @@ ASGIFramework = Callable[
     ],
     Awaitable[None],
 ]
+
+# The ASGI spec models the connection scope and the event messages as plain,
+# open-ended dicts rather than as fixed sets of keys:
+#
+#   "``scope`` must be a ``dict``."
+#   "the presence of additional keys in the event dictionary should not raise
+#    an exception. This allows non-breaking upgrades to protocol
+#    specifications over time."
+#
+# and it makes adding keys to the scope the documented middleware mechanism:
+#
+#   "Your one and only chance to add to it is before you hand control to the
+#    child application."
+#
+# -- https://asgi.readthedocs.io/en/latest/specs/main.html
+#
+# The ``TypedDict`` aliases above are closed, and no ``TypedDict`` is ever
+# assignable to ``dict``/``MutableMapping``. Frameworks that follow the spec and
+# annotate the scope and messages as mappings -- Starlette, FastAPI, Django --
+# therefore cannot satisfy ``ASGIFramework``, however spec-conformant they are.
+#
+# Anycorn keeps the strict types for its own internals, where it builds the
+# scopes and knows their exact shape, and describes an application here the way
+# the spec permits one to be written. The parameter types are chosen for
+# assignability rather than symmetry: ``scope`` and the ``receive`` result are
+# the most specific type an application may ask for, while ``send`` accepts the
+# most general, so that every annotation style in the wild is accepted.
+SpecASGIFramework = Callable[
+    [
+        dict[str, Any],
+        Callable[[], Awaitable[dict[str, Any]]],
+        Callable[[Mapping[str, Any]], Awaitable[None]],
+    ],
+    Awaitable[None],
+]
+
 WSGIFramework = Callable[[dict, Callable], Iterable[bytes]]
-Framework = ASGIFramework | WSGIFramework
+Framework = ASGIFramework | SpecASGIFramework | WSGIFramework
 
 
 class H2SyncStream(Protocol):
