@@ -22,6 +22,7 @@ from anycorn.typing import (
     WorkerContext,
 )
 from anycorn.utils import (
+    ClientDisconnected,
     InvalidRequestPathError,
     UnexpectedMessageError,
     build_and_validate_headers,
@@ -159,7 +160,7 @@ class HTTPStream:
             self.scope = HTTPScope(
                 type="http",
                 http_version=event.http_version,
-                asgi={"spec_version": "2.1", "version": "3.0"},
+                asgi={"spec_version": "2.5", "version": "3.0"},
                 method=event.method,
                 scheme=self.scheme,
                 path=decoded_path,
@@ -216,7 +217,14 @@ class HTTPStream:
                     await self._send_error_response(500)
                 else:
                     await self.send(StreamClosed(stream_id=self.stream_id))
-        elif message["type"] == "http.response.start" and self.state == ASGIHTTPState.REQUEST:
+            return
+
+        if self.closed:
+            # ASGI spec 2.4: the client has disconnected, so a send() must raise. The
+            # None sentinel above is the app finishing, not a send, so it returns first.
+            raise ClientDisconnected
+
+        if message["type"] == "http.response.start" and self.state == ASGIHTTPState.REQUEST:
             self.response = message
             headers = build_and_validate_headers(self.response.get("headers", []))
             await self.send(
