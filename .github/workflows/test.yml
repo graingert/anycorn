@@ -60,21 +60,35 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
+      - name: Set up Python
+        id: setup-python
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
       - name: Load the kernel TLS module
         # kTLS needs the tls ULP loaded; only Linux has it. Loading needs privilege, but the
         # (unprivileged) test process can then use it. Windows/macOS skip the kTLS tests.
         if: runner.os == 'Linux'
         run: sudo modprobe tls && cat /proc/sys/net/ipv4/tcp_available_ulp
-      - name: Run tests
-        # ssl.OP_ENABLE_KTLS is exposed on CPython 3.12+, so kTLS is required there (and only
-        # on Linux). ANYCORN_REQUIRE_KTLS makes tests/e2e/test_ktls_real.py fail - not skip -
-        # if kTLS does not actually activate, so it is verified on every uv Python from 3.12
-        # up, catching a runner (or interpreter's OpenSSL) without working kTLS.
+      - name: kTLS diagnostic
+        # Prints, for this interpreter, whether its OpenSSL actually offloads TLS to the
+        # kernel and which getsockopt reveals it. Never fails the job - it is here to explain
+        # a test_ktls_real failure, not to gate on.
+        if: runner.os == 'Linux' && matrix.python-version != '3.10' && matrix.python-version != '3.11'
         env:
+          UV_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: uv run python tests/e2e/ktls_probe.py || true
+      - name: Run tests
+        # Use the setup-python interpreter (not a uv-managed download), so its OpenSSL is the
+        # one under test. ssl.OP_ENABLE_KTLS is exposed on CPython 3.12+, so kTLS is required
+        # there (and only on Linux): ANYCORN_REQUIRE_KTLS makes tests/e2e/test_ktls_real.py
+        # fail - not skip - if kTLS does not actually activate, verifying it on 3.12, 3.13
+        # and 3.14 and catching an interpreter whose OpenSSL lacks kTLS.
+        env:
+          UV_PYTHON: ${{ steps.setup-python.outputs.python-path }}
           ANYCORN_REQUIRE_KTLS: ${{ (runner.os == 'Linux' && matrix.python-version != '3.10' && matrix.python-version != '3.11') && '1' || '' }}
         run: uv run pytest
 

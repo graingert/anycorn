@@ -106,6 +106,8 @@ line-length = 100
     "SLF001",
     "TRY003"
 ]
+# A standalone diagnostic script, run by hand/CI to report kTLS state - prints are the point.
+"tests/e2e/ktls_probe.py" = ["E501", "PERF203", "PLR2004", "SIM117", "T201"]
 
 [tool.ty.rules]
 unused-type-ignore-comment = "error"
