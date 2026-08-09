@@ -1,11 +1,12 @@
-"""Tests for the socket-backed TLS stream that backs kTLS zero-copy send.
+"""Tests for the socket-backed TLS stream and listener that back kTLS zero-copy send.
 
 kTLS itself needs a Linux kernel with the ``tls`` ULP loaded and an OpenSSL built with
-kTLS, which a restricted sandbox does not provide, so these tests exercise the part that
-is always reachable: driving a real ``SSLSocket`` non-blockingly over an ``AF_UNIX``
-socketpair - handshake, send, receive and close - as ordinary userspace TLS. Where kTLS is
-not active, :attr:`KTLSStream.sendfile_socket` must be ``None`` so callers never do a
-plaintext ``sendfile`` over a still-encrypting connection.
+kTLS, which a restricted sandbox does not provide, so these tests exercise the parts that
+are always reachable: the KTLSStream unit tests drive a real ``SSLSocket`` non-blockingly
+over a socketpair as ordinary userspace TLS, and the listener tests serve HTTPS through
+worker_serve (which uses the KTLSListener where kTLS is available). Where kTLS is not
+active, :attr:`KTLSStream.sendfile_socket` is ``None`` and the zerocopysend extension is
+not offered, so a plaintext ``sendfile`` is never done over a still-encrypting connection.
 """
 
 from __future__ import annotations
@@ -15,6 +16,8 @@ import ssl
 from typing import TYPE_CHECKING, Any
 
 import anyio
+import anyio.to_thread
+import httpx2
 import pytest
 import trustme
 from anyio.abc import SocketAttribute
@@ -22,12 +25,13 @@ from anyio.streams.tls import TLSAttribute
 
 from anycorn.app_wrappers import ASGIWrapper
 from anycorn.config import Config
-from anycorn.ktls import KTLSAttribute, KTLSListener, KTLSStream, can_enable_ktls, enable_ktls
-from anycorn.tcp_server import tcp_server_handler
-from anycorn.worker_context import WorkerContext
+from anycorn.ktls import KTLSAttribute, KTLSStream, can_enable_ktls, enable_ktls
+from anycorn.run import worker_serve
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from tests.conftest import TLSCerts
 
 
 @pytest.fixture
@@ -66,6 +70,7 @@ async def test_handshake_and_round_trip(certificate_authority: trustme.CA) -> No
 
     async def run_client() -> None:
         nonlocal received
+
         # The stdlib client side runs in a worker thread with a blocking handshake, so the
         # server's non-blocking KTLSStream is what is under test here.
         def talk() -> bytes:
@@ -163,42 +168,47 @@ def test_can_enable_ktls_matches_platform() -> None:
         assert hasattr(ssl, "OP_ENABLE_KTLS")
 
 
-def _tls_client_request(
-    sock_path: str, client_ctx: ssl.SSLContext, request: bytes, body_length: int
-) -> tuple[bytes, bytes]:
-    """Blocking helper: make one TLS request over an AF_UNIX socket, return (head, body)."""
-    raw = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    raw.connect(sock_path)
-    tls = client_ctx.wrap_socket(raw, server_hostname="localhost")
-    try:
-        tls.sendall(request)
-        buffer = b""
-        while b"\r\n\r\n" not in buffer:
-            buffer += tls.recv(4096)
-        head, _, body = buffer.partition(b"\r\n\r\n")
-        while len(body) < body_length:
-            body += tls.recv(4096)
-    finally:
-        tls.close()
-    return head, body
+async def _serve_tls_and_get(app: Any, tls_certs: TLSCerts) -> httpx2.Response:  # noqa: ANN401
+    """Serve *app* over HTTPS with worker_serve (use_ktls) and GET once over TCP.
+
+    With ``use_ktls`` set, worker_serve serves through the KTLSListener wherever kTLS is
+    available (Linux with a kTLS OpenSSL) and falls back to ordinary TLS elsewhere; either
+    way, without the kernel tls ULP the send path stays in userspace.
+    """
+    config = Config()
+    config.bind = ["127.0.0.1:0"]
+    config.certfile = str(tls_certs.certfile)
+    config.keyfile = str(tls_certs.keyfile)
+    config.alpn_protocols = ["http/1.1"]
+    config.use_ktls = True
+    config.accesslog = "-"
+    config.errorlog = "-"
+    shutdown = anyio.Event()
+    verify = ssl.create_default_context(cafile=str(tls_certs.cafile))
+
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as task_group:
+            binds: list[str] = await task_group.start(
+                lambda *, task_status: worker_serve(
+                    ASGIWrapper(app),
+                    config,
+                    shutdown_trigger=shutdown.wait,
+                    task_status=task_status,
+                )
+            )
+            async with httpx2.AsyncClient(base_url=binds[0], verify=verify) as client:
+                response = await client.get("/")
+            shutdown.set()
+    return response
 
 
 @pytest.mark.anyio
-async def test_ktls_listener_serves_https(
-    tmp_path: Path, certificate_authority: trustme.CA
-) -> None:
-    """KTLSListener drives a whole HTTPS request/response, falling back to userspace TLS.
+async def test_ktls_listener_serves_https(tls_certs: TLSCerts) -> None:
+    """worker_serve with use_ktls serves a whole HTTPS request; here as userspace TLS.
 
-    The sandbox has no kernel tls ULP, so kTLS never activates: the response body is read and
-    encrypted through the stream, and the zerocopysend extension is deliberately not offered.
+    Without the kernel tls ULP kTLS never activates, so the body is read and encrypted
+    through the stream and the zerocopysend extension is deliberately not offered.
     """
-    sock_path = str(tmp_path / "https.sock")
-    listen_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listen_sock.bind(sock_path)
-    listen_sock.listen(1)
-
-    server_ctx = _server_context(certificate_authority)
-    client_ctx = _client_context(certificate_authority)
     payload = b"hello over a kTLS-capable listener\n" * 100
     captured: dict[str, Any] = {}
 
@@ -214,42 +224,21 @@ async def test_ktls_listener_serves_https(
         )
         await send({"type": "http.response.body", "body": payload})
 
-    handler = tcp_server_handler(ASGIWrapper(app), Config(), WorkerContext(None), {})
-    listener = KTLSListener(listen_sock, server_ctx)
-    request = b"GET / HTTP/1.1\r\nHost: anycorn\r\n\r\n"
-
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(listener.serve, handler)
-        head, body = await anyio.to_thread.run_sync(
-            _tls_client_request, sock_path, client_ctx, request, len(payload)
-        )
-        task_group.cancel_scope.cancel()
-    listen_sock.close()
-
-    assert head.startswith(b"HTTP/1.1 200")
-    assert body == payload
-    assert captured["scheme"] == "https"
+    response = await _serve_tls_and_get(app, tls_certs)
+    response.raise_for_status()
+    assert response.content == payload
     assert "tls" in captured["extensions"]
+    assert captured["scheme"] == "https"
     # Userspace TLS: a plaintext sendfile would leak, so zerocopysend must stay unadvertised.
     assert "http.response.zerocopysend" not in captured["extensions"]
 
 
 @pytest.mark.anyio
-async def test_ktls_listener_pathsend_falls_back(
-    tmp_path: Path, certificate_authority: trustme.CA
-) -> None:
-    """Path send over a userspace-TLS KTLSListener reads and encrypts the file via the stream."""
+async def test_ktls_listener_pathsend_falls_back(tmp_path: Path, tls_certs: TLSCerts) -> None:
+    """Path send over a userspace-TLS connection reads and encrypts the file via the stream."""
     payload = bytes(range(256)) * 200
     file_path = tmp_path / "payload.bin"
-    file_path.write_bytes(payload)
-
-    sock_path = str(tmp_path / "https.sock")
-    listen_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listen_sock.bind(sock_path)
-    listen_sock.listen(1)
-
-    server_ctx = _server_context(certificate_authority)
-    client_ctx = _client_context(certificate_authority)
+    await anyio.Path(file_path).write_bytes(payload)
 
     async def app(scope: Any, receive: Any, send: Any) -> None:  # noqa: ANN401, ARG001
         await send(
@@ -261,17 +250,6 @@ async def test_ktls_listener_pathsend_falls_back(
         )
         await send({"type": "http.response.pathsend", "path": str(file_path)})
 
-    handler = tcp_server_handler(ASGIWrapper(app), Config(), WorkerContext(None), {})
-    listener = KTLSListener(listen_sock, server_ctx)
-    request = b"GET / HTTP/1.1\r\nHost: anycorn\r\n\r\n"
-
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(listener.serve, handler)
-        head, body = await anyio.to_thread.run_sync(
-            _tls_client_request, sock_path, client_ctx, request, len(payload)
-        )
-        task_group.cancel_scope.cancel()
-    listen_sock.close()
-
-    assert head.startswith(b"HTTP/1.1 200")
-    assert body == payload
+    response = await _serve_tls_and_get(app, tls_certs)
+    response.raise_for_status()
+    assert response.content == payload

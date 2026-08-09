@@ -39,7 +39,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 HOST = "127.0.0.1"
-TLS_HOST = "localhost"
 
 
 @pytest.mark.anyio
@@ -61,14 +60,29 @@ async def test_worker_serve_uses_real_ktls_for_zero_copy_send(
 
     payload = bytes(range(256)) * 4000  # ~1 MiB, well past a single TLS record
     file_path = tmp_path / "payload.bin"
-    file_path.write_bytes(payload)
+    await anyio.Path(file_path).write_bytes(payload)
 
     seen: dict[str, Any] = {}
 
-    async def app(scope: Any, receive: Any, send: Any) -> None:  # noqa: ANN401, ARG001
-        seen["extensions"] = dict(scope["extensions"])
-        file = file_path.open("rb")
-        try:
+    config = Config()
+    config.bind = [f"{HOST}:{free_tcp_port}"]
+    config.certfile = str(tls_certs.certfile)
+    config.keyfile = str(tls_certs.keyfile)
+    config.alpn_protocols = ["http/1.1"]
+    config.use_ktls = True
+    config.accesslog = "-"
+    config.errorlog = "-"
+
+    shutdown = anyio.Event()
+    verify = ssl.create_default_context(cafile=str(tls_certs.cafile))
+
+    # Opened here, not inside the app: the app runs in the server's task group, which is
+    # cancelled at shutdown, and an awaited close racing that cancellation can leak the file.
+    file = await anyio.Path(file_path).open("rb")
+    try:
+
+        async def app(scope: Any, receive: Any, send: Any) -> None:  # noqa: ANN401, ARG001
+            seen["extensions"] = dict(scope["extensions"])
             await send(
                 {
                     "type": "http.response.start",
@@ -84,36 +98,24 @@ async def test_worker_serve_uses_real_ktls_for_zero_copy_send(
                     "count": len(payload),
                 }
             )
-        finally:
-            file.close()
 
-    config = Config()
-    config.bind = [f"{HOST}:{free_tcp_port}"]
-    config.certfile = str(tls_certs.certfile)
-    config.keyfile = str(tls_certs.keyfile)
-    config.alpn_protocols = ["http/1.1"]
-    config.use_ktls = True
-    config.accesslog = "-"
-    config.errorlog = "-"
-
-    shutdown = anyio.Event()
-    verify = ssl.create_default_context(cafile=str(tls_certs.cafile))
-
-    with anyio.fail_after(30):
-        async with anyio.create_task_group() as task_group:
-            await task_group.start(
-                lambda *, task_status: worker_serve(
-                    ASGIWrapper(app),
-                    config,
-                    shutdown_trigger=shutdown.wait,
-                    task_status=task_status,
+        with anyio.fail_after(30):
+            async with anyio.create_task_group() as task_group:
+                await task_group.start(
+                    lambda *, task_status: worker_serve(
+                        ASGIWrapper(app),
+                        config,
+                        shutdown_trigger=shutdown.wait,
+                        task_status=task_status,
+                    )
                 )
-            )
-            async with httpx2.AsyncClient(
-                base_url=f"https://{TLS_HOST}:{free_tcp_port}", verify=verify
-            ) as client:
-                response = await client.get("/")
-            shutdown.set()
+                async with httpx2.AsyncClient(
+                    base_url=f"https://{HOST}:{free_tcp_port}", verify=verify
+                ) as client:
+                    response = await client.get("/")
+                shutdown.set()
+    finally:
+        await file.aclose()
 
     response.raise_for_status()
     assert response.content == payload

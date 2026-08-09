@@ -35,8 +35,9 @@ async def test_sendfile_transmits_the_whole_file(tmp_path: Path) -> None:
     """A file larger than the socket buffer is sent in full, awaiting writability."""
     payload = b"zero-copy payload\n" * 100_000  # ~1.8 MiB, well over the socket buffer
     file_path = tmp_path / "payload.bin"
-    file_path.write_bytes(payload)
-    in_fd = os.open(file_path, os.O_RDONLY)
+    await anyio.Path(file_path).write_bytes(payload)
+    file = await anyio.Path(file_path).open("rb")
+    in_fd = file.wrapped.fileno()
     send_sock, recv_sock = tcp_socket_pair()
     send_sock.setblocking(False)  # noqa: FBT003
 
@@ -52,7 +53,7 @@ async def test_sendfile_transmits_the_whole_file(tmp_path: Path) -> None:
             sent = await sendfile(send_sock, in_fd, 0, len(payload))
             assert sent == len(payload)
     finally:
-        os.close(in_fd)
+        await file.aclose()
         send_sock.close()
         recv_sock.close()
 
@@ -64,8 +65,9 @@ async def test_sendfile_honours_offset_and_count(tmp_path: Path) -> None:
     """Only the requested window of the file is sent."""
     payload = bytes(range(256)) * 8
     file_path = tmp_path / "payload.bin"
-    file_path.write_bytes(payload)
-    in_fd = os.open(file_path, os.O_RDONLY)
+    await anyio.Path(file_path).write_bytes(payload)
+    file = await anyio.Path(file_path).open("rb")
+    in_fd = file.wrapped.fileno()
     send_sock, recv_sock = tcp_socket_pair()
     send_sock.setblocking(False)  # noqa: FBT003
 
@@ -81,7 +83,7 @@ async def test_sendfile_honours_offset_and_count(tmp_path: Path) -> None:
             sent = await sendfile(send_sock, in_fd, 10, 100)
             assert sent == 100  # noqa: PLR2004
     finally:
-        os.close(in_fd)
+        await file.aclose()
         send_sock.close()
         recv_sock.close()
 
@@ -93,8 +95,9 @@ async def test_sendfile_without_count_reads_to_eof(tmp_path: Path) -> None:
     """count=None sends from the offset to the end of the file."""
     payload = b"tail" * 1000
     file_path = tmp_path / "payload.bin"
-    file_path.write_bytes(payload)
-    in_fd = os.open(file_path, os.O_RDONLY)
+    await anyio.Path(file_path).write_bytes(payload)
+    file = await anyio.Path(file_path).open("rb")
+    in_fd = file.wrapped.fileno()
     send_sock, recv_sock = tcp_socket_pair()
     send_sock.setblocking(False)  # noqa: FBT003
 
@@ -110,7 +113,7 @@ async def test_sendfile_without_count_reads_to_eof(tmp_path: Path) -> None:
             sent = await sendfile(send_sock, in_fd, 4, None)
             assert sent == len(payload) - 4
     finally:
-        os.close(in_fd)
+        await file.aclose()
         send_sock.close()
         recv_sock.close()
 
@@ -122,8 +125,9 @@ async def test_sendfile_offset_none_uses_current_position(tmp_path: Path) -> Non
     """offset=None starts from the file's current position."""
     payload = b"0123456789"
     file_path = tmp_path / "payload.bin"
-    file_path.write_bytes(payload)
-    in_fd = os.open(file_path, os.O_RDONLY)
+    await anyio.Path(file_path).write_bytes(payload)
+    file = await anyio.Path(file_path).open("rb")
+    in_fd = file.wrapped.fileno()
     os.lseek(in_fd, 3, os.SEEK_SET)
     send_sock, recv_sock = tcp_socket_pair()
     send_sock.setblocking(False)  # noqa: FBT003
@@ -140,7 +144,7 @@ async def test_sendfile_offset_none_uses_current_position(tmp_path: Path) -> Non
             sent = await sendfile(send_sock, in_fd, None, None)
             assert sent == 7  # noqa: PLR2004
     finally:
-        os.close(in_fd)
+        await file.aclose()
         send_sock.close()
         recv_sock.close()
 

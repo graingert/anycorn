@@ -39,20 +39,27 @@ def test_access_logger_init(
     config.accesslog = target
     config.access_log_format = "%h"
     logger = Logger(config)
-    assert logger.access_log_format == "%h"
-    assert logger.getEffectiveLevel() == logging.INFO
-    if target is None:
-        assert logger.access_logger is None
-    elif expected_name is None:
-        assert logger.access_logger is not None
-        assert logger.access_logger.handlers == []
-    else:
-        assert logger.access_logger is not None
-        assert logger.access_logger.name == expected_name
-        if expected_handler_type is None:
+    try:
+        assert logger.access_log_format == "%h"
+        assert logger.getEffectiveLevel() == logging.INFO
+        if target is None:
+            assert logger.access_logger is None
+        elif expected_name is None:
+            assert logger.access_logger is not None
             assert logger.access_logger.handlers == []
         else:
-            assert isinstance(logger.access_logger.handlers[0], expected_handler_type)
+            assert logger.access_logger is not None
+            assert logger.access_logger.name == expected_name
+            if expected_handler_type is None:
+                assert logger.access_logger.handlers == []
+            else:
+                assert isinstance(logger.access_logger.handlers[0], expected_handler_type)
+    finally:
+        # A file target opens a FileHandler; close it so the log file is not leaked.
+        for candidate in (logger.access_logger, logger.error_logger):
+            if candidate is not None:
+                for handler in candidate.handlers:
+                    handler.close()
 
 
 @pytest.mark.parametrize(
