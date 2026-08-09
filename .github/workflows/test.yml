@@ -73,14 +73,6 @@ jobs:
         # (unprivileged) test process can then use it. Windows/macOS skip the kTLS tests.
         if: runner.os == 'Linux'
         run: sudo modprobe tls && cat /proc/sys/net/ipv4/tcp_available_ulp
-      - name: kTLS diagnostic
-        # Prints, for this interpreter, whether its OpenSSL actually offloads TLS to the
-        # kernel and which getsockopt reveals it. Never fails the job - it is here to explain
-        # a test_ktls_real failure, not to gate on.
-        if: runner.os == 'Linux' && matrix.python-version != '3.10' && matrix.python-version != '3.11'
-        env:
-          UV_PYTHON: ${{ steps.setup-python.outputs.python-path }}
-        run: uv run python tests/e2e/ktls_probe.py || true
       - name: Run tests
         # Use the setup-python interpreter (not a uv-managed download), so its OpenSSL is the
         # one under test. ssl.OP_ENABLE_KTLS is exposed on CPython 3.12+, so kTLS is required
