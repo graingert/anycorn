@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import socket
 import ssl
+import sys
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -32,6 +33,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from tests.conftest import TLSCerts
+
+# kTLS is Linux-only, and the socket-backed KTLSStream drives a non-blocking SSLSocket via
+# anyio.wait_readable/writable, which the asyncio proactor loop on Windows does not support.
+# Off Linux, can_enable_ktls is False and worker_serve never selects the KTLSListener anyway.
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux", reason="kTLS and its socket-backed TLS stream are Linux-only"
+)
 
 
 @pytest.fixture
