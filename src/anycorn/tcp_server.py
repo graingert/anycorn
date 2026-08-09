@@ -11,14 +11,16 @@ import anyio
 import anyio.abc
 import anyio.streams.tls
 
-from .events import Closed, Event, RawData, Updated
+from .events import Closed, Event, RawData, SendFile, Updated
 from .protocol import ProtocolWrapper
+from .sendfile import have_sendfile, read_file_chunks, sendfile
 from .task_group import TaskGroup
 from .typing import AppWrapper, ConnectionState, LifespanState
 from .utils import build_tls_extension, parse_socket_addr
 from .worker_context import AnyioSingleTask, WorkerContext
 
 if TYPE_CHECKING:
+    import socket as socket_module
     from collections.abc import Callable
 
     from .config import Config
@@ -47,6 +49,9 @@ class TCPServer:
         self.stream = stream
 
         self._idle_handle: anyio.CancelScope | None = None
+        # The raw socket to os.sendfile over, set once the connection is known to be
+        # plaintext (a TLS stream encrypts in userspace, so it cannot be zero copy).
+        self._sendfile_socket: socket_module.socket | None = None
 
     async def run(self) -> None:
         """Run the server for this connection."""
@@ -61,6 +66,10 @@ class TCPServer:
             socket = self.stream.extra(anyio.abc.SocketAttribute.raw_socket)  # noqa: S610
             client = parse_socket_addr(socket.family, socket.getpeername())
             server = parse_socket_addr(socket.family, socket.getsockname())
+            # Real zero-copy send is only possible on a plaintext socket; on a TLS
+            # connection the body is read and encrypted through the stream instead.
+            if tls_extension is None and have_sendfile:
+                self._sendfile_socket = socket
 
             async with TaskGroup() as task_group:
                 self._task_group = task_group
@@ -93,6 +102,18 @@ class TCPServer:
                         await self.stream.send(event.data)
                 except (anyio.ClosedResourceError, anyio.BrokenResourceError, TimeoutError):
                     await self.protocol.handle(Closed())
+        elif isinstance(event, SendFile):
+            async with self.send_lock:
+                try:
+                    with anyio.CancelScope(shield=True):
+                        await self._transmit_file(event)
+                except (
+                    anyio.ClosedResourceError,
+                    anyio.BrokenResourceError,
+                    TimeoutError,
+                    OSError,
+                ):
+                    await self.protocol.handle(Closed())
         elif isinstance(event, Closed):
             await self._close()
             await self.protocol.handle(Closed())
@@ -101,6 +122,16 @@ class TCPServer:
                 await self.idle_task.restart(self._task_group, self._idle_timeout)
             else:
                 await self.idle_task.stop()
+
+    async def _transmit_file(self, event: SendFile) -> None:
+        """Send a file body, with a zero-copy os.sendfile where the socket allows it."""
+        if self._sendfile_socket is not None:
+            await sendfile(self._sendfile_socket, event.file, event.offset, event.count)
+        else:
+            # A TLS connection (or a platform without sendfile): read the window and send
+            # it through the stream, which encrypts it as any other body bytes.
+            async for chunk in read_file_chunks(event.file, event.offset, event.count):
+                await self.stream.send(chunk)
 
     async def _read_data(self) -> None:
         while True:

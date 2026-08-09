@@ -4,6 +4,11 @@
 
 - Implement the Path Send extension (`http.response.pathsend`), streaming a file the
   app names by path as the response body on any HTTP version.
+- Implement the Zero Copy Send extension (`http.response.zerocopysend`) with a real
+  `os.sendfile` over a plaintext HTTP/1.1 socket. It is advertised only where it can
+  really be zero copy - HTTP/2, HTTP/3 and TLS connections are not offered it rather
+  than silently reading and sending. Path send now routes through the same path, so it
+  too is `os.sendfile` on plaintext HTTP/1.1.
 
 ## 0.20.0
 

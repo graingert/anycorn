@@ -17,8 +17,10 @@ from anycorn.protocol.events import (
     Response,
     StreamClosed,
     Trailers,
+    ZeroCopySend,
 )
 from anycorn.protocol.http_stream import ASGIHTTPState, HTTPStream
+from anycorn.sendfile import have_sendfile
 from anycorn.statsd import StatsdLogger
 from anycorn.typing import (
     ConnectionState,
@@ -84,6 +86,10 @@ async def test_handle_request_http_1(stream: HTTPStream, http_version: str) -> N
     )
     stream.task_group.spawn_app.assert_called()  # type: ignore[attr-defined]
     scope = stream.task_group.spawn_app.call_args[0][2]  # type: ignore[attr-defined]
+    # Zero copy send is offered on plaintext HTTP/1.1, but only where os.sendfile exists.
+    expected_extensions: dict = {"http.response.pathsend": {}}
+    if have_sendfile:
+        expected_extensions["http.response.zerocopysend"] = {}
     assert scope == {
         "type": "http",
         "http_version": http_version,
@@ -97,7 +103,7 @@ async def test_handle_request_http_1(stream: HTTPStream, http_version: str) -> N
         "headers": [],
         "client": None,
         "server": None,
-        "extensions": {"http.response.pathsend": {}},
+        "extensions": expected_extensions,
         "state": ConnectionState({}),
     }
 
@@ -253,9 +259,11 @@ async def test_pathsend_streams_the_named_file(stream: HTTPStream, tmp_path: Pat
     }
     await stream.app_send(pathsend)
 
-    # The whole file went out as body, and the response was finished off.
-    body = b"".join(event.data for event in sent if isinstance(event, Body))
-    assert body == payload
+    # On HTTP/1.1 the file is handed to the connection as a ZeroCopySend (os.sendfile),
+    # so its bytes are not read here; the whole file is covered and the response closed.
+    # The bytes actually reaching a client are covered by the socketpair test below.
+    zerocopy = next(event for event in sent if isinstance(event, ZeroCopySend))
+    assert (zerocopy.offset, zerocopy.count) == (0, len(payload))
     assert any(isinstance(event, EndBody) for event in sent)
     assert any(isinstance(event, StreamClosed) for event in sent)
 
