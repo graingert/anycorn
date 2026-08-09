@@ -10,12 +10,17 @@ import anyio
 import anyio.to_thread
 import pytest
 
-from anycorn.sendfile import have_sendfile, sendfile
+from anycorn.sendfile import sendfile
+
+from .helpers import sendfile_over_socketpair_supported
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-pytestmark = pytest.mark.skipif(not have_sendfile, reason="os.sendfile unavailable")
+pytestmark = pytest.mark.skipif(
+    not sendfile_over_socketpair_supported(),
+    reason="os.sendfile over an AF_UNIX socketpair is unsupported here",
+)
 
 
 async def _drain(sock: socket.socket, expected: int) -> bytes:

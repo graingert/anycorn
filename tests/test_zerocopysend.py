@@ -17,14 +17,18 @@ from anyio.abc import SocketStream
 
 from anycorn.app_wrappers import ASGIWrapper
 from anycorn.config import Config
-from anycorn.sendfile import have_sendfile
 from anycorn.tcp_server import TCPServer
 from anycorn.worker_context import WorkerContext
+
+from .helpers import sendfile_over_socketpair_supported
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-pytestmark = pytest.mark.skipif(not have_sendfile, reason="os.sendfile unavailable")
+pytestmark = pytest.mark.skipif(
+    not sendfile_over_socketpair_supported(),
+    reason="os.sendfile over an AF_UNIX socketpair is unsupported here",
+)
 
 
 async def _read_response(stream: SocketStream, body_length: int) -> tuple[bytes, bytes]:

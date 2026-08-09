@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import socket
+import tempfile
 from contextlib import AsyncExitStack, asynccontextmanager
 from copy import deepcopy
 from json import dumps
@@ -28,6 +31,27 @@ if TYPE_CHECKING:
     from anycorn.typing import ASGIReceiveCallable, ASGISendCallable, Scope, WWWScope
 
 SANITY_BODY = b"Hello Anycorn"
+
+
+def sendfile_over_socketpair_supported() -> bool:
+    """Whether ``os.sendfile`` can transmit over an ``AF_UNIX`` socketpair here.
+
+    ``os.sendfile`` exists on macOS too, but there it serves network sockets and does not
+    support the ``AF_UNIX`` socketpairs the sendfile tests drive it over - it raises - so the
+    tests probe the real behaviour rather than assume a platform. Windows has no
+    ``os.sendfile`` at all.
+    """
+    if not hasattr(os, "sendfile"):
+        return False
+    send_sock, recv_sock = socket.socketpair()
+    with send_sock, recv_sock, tempfile.TemporaryFile() as tmp:
+        tmp.write(b"probe")
+        tmp.flush()
+        try:
+            os.sendfile(send_sock.fileno(), tmp.fileno(), 0, 5)
+        except OSError:
+            return False
+        return True
 
 
 class MockSocket:

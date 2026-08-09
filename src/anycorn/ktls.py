@@ -45,6 +45,10 @@ logger = logging.getLogger(__name__)
 # ``getsockopt`` that fails cleanly where the ULP is absent.
 _SOL_TLS = 282
 _TLS_TX = 1
+# ``sizeof(struct tls_crypto_info)`` - the base header the kernel copies out for a TLS_TX
+# getsockopt. The kernel rejects a shorter buffer with EINVAL *before* it checks whether the
+# send path is configured, so the probe must request at least this many bytes.
+_TLS_CRYPTO_INFO_SIZE = 4
 
 # ``ssl.OP_ENABLE_KTLS`` exists only when Python is linked against an OpenSSL built with kTLS
 # support; it is the one piece that cannot be assumed. kTLS itself is Linux-only.
@@ -67,14 +71,14 @@ def _ktls_send_active(sock: socket.socket) -> bool:
 
     Reads the ``TLS_TX`` socket option: the kernel only answers it once OpenSSL has
     attached the ``tls`` ULP and installed the send keys, so a successful read is a
-    positive confirmation. Any error - the ULP absent, kTLS not negotiated, or a wrong
-    platform - is treated as "not active", so a plaintext ``sendfile`` is never done over
-    a connection that is still encrypting in userspace.
+    positive confirmation. Any error - the ULP absent (the level is unknown, ENOPROTOOPT),
+    the send path not configured (EBUSY), a wrong platform - is treated as "not active", so
+    a plaintext ``sendfile`` is never done over a connection still encrypting in userspace.
     """
     if not can_enable_ktls:
         return False
     try:
-        sock.getsockopt(_SOL_TLS, _TLS_TX, 1)
+        sock.getsockopt(_SOL_TLS, _TLS_TX, _TLS_CRYPTO_INFO_SIZE)
     except OSError:
         return False
     return True
