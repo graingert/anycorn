@@ -1,26 +1,23 @@
-"""Tests for the zero-copy sendfile helper, driven over a real socketpair."""
+"""Tests for the zero-copy sendfile helper, driven over a real loopback TCP connection."""
 
 from __future__ import annotations
 
 import os
-import socket
 from typing import TYPE_CHECKING
 
 import anyio
 import anyio.to_thread
 import pytest
 
-from anycorn.sendfile import sendfile
+from anycorn.sendfile import have_sendfile, sendfile
 
-from .helpers import sendfile_over_socketpair_supported
+from .helpers import tcp_socket_pair
 
 if TYPE_CHECKING:
+    import socket
     from pathlib import Path
 
-pytestmark = pytest.mark.skipif(
-    not sendfile_over_socketpair_supported(),
-    reason="os.sendfile over an AF_UNIX socketpair is unsupported here",
-)
+pytestmark = pytest.mark.skipif(not have_sendfile, reason="os.sendfile unavailable")
 
 
 async def _drain(sock: socket.socket, expected: int) -> bytes:
@@ -40,7 +37,7 @@ async def test_sendfile_transmits_the_whole_file(tmp_path: Path) -> None:
     file_path = tmp_path / "payload.bin"
     file_path.write_bytes(payload)
     in_fd = os.open(file_path, os.O_RDONLY)
-    send_sock, recv_sock = socket.socketpair()
+    send_sock, recv_sock = tcp_socket_pair()
     send_sock.setblocking(False)  # noqa: FBT003
 
     received = b""
@@ -69,7 +66,7 @@ async def test_sendfile_honours_offset_and_count(tmp_path: Path) -> None:
     file_path = tmp_path / "payload.bin"
     file_path.write_bytes(payload)
     in_fd = os.open(file_path, os.O_RDONLY)
-    send_sock, recv_sock = socket.socketpair()
+    send_sock, recv_sock = tcp_socket_pair()
     send_sock.setblocking(False)  # noqa: FBT003
 
     received = b""
@@ -98,7 +95,7 @@ async def test_sendfile_without_count_reads_to_eof(tmp_path: Path) -> None:
     file_path = tmp_path / "payload.bin"
     file_path.write_bytes(payload)
     in_fd = os.open(file_path, os.O_RDONLY)
-    send_sock, recv_sock = socket.socketpair()
+    send_sock, recv_sock = tcp_socket_pair()
     send_sock.setblocking(False)  # noqa: FBT003
 
     received = b""
@@ -128,7 +125,7 @@ async def test_sendfile_offset_none_uses_current_position(tmp_path: Path) -> Non
     file_path.write_bytes(payload)
     in_fd = os.open(file_path, os.O_RDONLY)
     os.lseek(in_fd, 3, os.SEEK_SET)
-    send_sock, recv_sock = socket.socketpair()
+    send_sock, recv_sock = tcp_socket_pair()
     send_sock.setblocking(False)  # noqa: FBT003
 
     received = b""

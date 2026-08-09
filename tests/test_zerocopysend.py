@@ -1,14 +1,13 @@
-"""Full-stack zero-copy tests: a real request over a socketpair, served with sendfile.
+"""Full-stack zero-copy tests: a real request over a loopback TCP connection, with sendfile.
 
 These drive a whole ``TCPServer`` - HTTP/1.1 parsing, the app, h11 framing and the
-os.sendfile in ``_transmit_file`` - over an ``AF_UNIX`` socketpair, which (unlike the
-``AF_INET`` e2e tests) can be created in a restricted sandbox, so the bytes a client
-actually receives are asserted end to end.
+os.sendfile in ``_transmit_file`` - over a loopback TCP connection, so the bytes a client
+actually receives are asserted end to end. TCP rather than an ``AF_UNIX`` socketpair
+because ``os.sendfile`` does not support the latter on macOS.
 """
 
 from __future__ import annotations
 
-import socket
 from typing import TYPE_CHECKING, Any
 
 import anyio
@@ -17,18 +16,16 @@ from anyio.abc import SocketStream
 
 from anycorn.app_wrappers import ASGIWrapper
 from anycorn.config import Config
+from anycorn.sendfile import have_sendfile
 from anycorn.tcp_server import TCPServer
 from anycorn.worker_context import WorkerContext
 
-from .helpers import sendfile_over_socketpair_supported
+from .helpers import tcp_socket_pair
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-pytestmark = pytest.mark.skipif(
-    not sendfile_over_socketpair_supported(),
-    reason="os.sendfile over an AF_UNIX socketpair is unsupported here",
-)
+pytestmark = pytest.mark.skipif(not have_sendfile, reason="os.sendfile unavailable")
 
 
 async def _read_response(stream: SocketStream, body_length: int) -> tuple[bytes, bytes]:
@@ -44,8 +41,8 @@ async def _read_response(stream: SocketStream, body_length: int) -> tuple[bytes,
 
 
 async def _serve_one(app: Any, request: bytes, body_length: int) -> tuple[bytes, bytes]:  # noqa: ANN401
-    """Serve *app* to a single *request* over a socketpair and return its (head, body)."""
-    server_sock, client_sock = socket.socketpair()
+    """Serve *app* to a single *request* over a TCP connection and return its (head, body)."""
+    server_sock, client_sock = tcp_socket_pair()
     server_stream = await SocketStream.from_socket(server_sock)
     client_stream = await SocketStream.from_socket(client_sock)
     server = TCPServer(ASGIWrapper(app), Config(), WorkerContext(None), {}, server_stream)

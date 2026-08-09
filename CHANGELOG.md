@@ -5,10 +5,11 @@
 - Implement the Path Send extension (`http.response.pathsend`), streaming a file the
   app names by path as the response body on any HTTP version.
 - Implement the Zero Copy Send extension (`http.response.zerocopysend`) with a real
-  `os.sendfile` over an HTTP/1.1 socket. It is advertised only where it can really be
-  zero copy - HTTP/2, HTTP/3 and userspace TLS connections are not offered it rather
-  than silently reading and sending. Path send now routes through the same path, so it
-  too is `os.sendfile` on HTTP/1.1.
+  `os.sendfile` over a TCP HTTP/1.1 socket. It is advertised only where it can really be
+  zero copy - HTTP/2, HTTP/3, userspace TLS and UNIX-domain-socket connections are not
+  offered it rather than silently reading and sending (`os.sendfile` is not portable over
+  a UNIX socket). Path send now routes through the same path, so it too is `os.sendfile`
+  on TCP HTTP/1.1.
 - Add a `use_ktls` config flag that binds TLS to the accepted socket and asks OpenSSL to
   enable kernel TLS, so `os.sendfile` (zerocopysend and pathsend) still works over a TLS
   HTTP/1.1 connection. It takes effect only on Linux with an OpenSSL that supports kTLS;

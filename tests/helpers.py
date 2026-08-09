@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-import os
 import socket
-import tempfile
 from contextlib import AsyncExitStack, asynccontextmanager
 from copy import deepcopy
 from json import dumps
@@ -33,25 +31,23 @@ if TYPE_CHECKING:
 SANITY_BODY = b"Hello Anycorn"
 
 
-def sendfile_over_socketpair_supported() -> bool:
-    """Whether ``os.sendfile`` can transmit over an ``AF_UNIX`` socketpair here.
+def tcp_socket_pair() -> tuple[socket.socket, socket.socket]:
+    """Return two connected loopback TCP sockets, like ``socket.socketpair()`` but AF_INET.
 
-    ``os.sendfile`` exists on macOS too, but there it serves network sockets and does not
-    support the ``AF_UNIX`` socketpairs the sendfile tests drive it over - it raises - so the
-    tests probe the real behaviour rather than assume a platform. Windows has no
-    ``os.sendfile`` at all.
+    The sendfile tests need a real socket to ``os.sendfile`` over. ``socket.socketpair()``
+    gives an ``AF_UNIX`` pair, which ``os.sendfile`` does not support on macOS, whereas it
+    serves network sockets on every platform that has it - so the tests connect over TCP.
+    A blocking ``connect`` before ``accept`` is fine for loopback: the kernel completes the
+    handshake into the listen backlog, so ``connect`` returns without ``accept`` running.
     """
-    if not hasattr(os, "sendfile"):
-        return False
-    send_sock, recv_sock = socket.socketpair()
-    with send_sock, recv_sock, tempfile.TemporaryFile() as tmp:
-        tmp.write(b"probe")
-        tmp.flush()
-        try:
-            os.sendfile(send_sock.fileno(), tmp.fileno(), 0, 5)
-        except OSError:
-            return False
-        return True
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    with listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.connect(listener.getsockname())
+        server, _ = listener.accept()
+    return server, client
 
 
 class MockSocket:

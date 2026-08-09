@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 from math import inf
+from socket import AF_INET, AF_INET6
 from ssl import SSLZeroReturnError
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,11 @@ if TYPE_CHECKING:
     from .config import Config
 
 MAX_RECV = 2**16
+
+# os.sendfile is only used over TCP: it is unsupported over a UNIX domain socket on macOS,
+# and kTLS (the TLS send path) is TCP-only, so a UNIX-socket connection reads and sends
+# through the stream instead.
+_SENDFILE_FAMILIES = frozenset({AF_INET, AF_INET6})
 
 
 class TCPServer:
@@ -70,8 +76,9 @@ class TCPServer:
             # Real zero-copy send needs a socket the kernel can put the file bytes on
             # directly: a plaintext socket, or a TLS one the kernel encrypts itself (kTLS).
             # Userspace TLS encrypts in Python, so the body is read and sent through the
-            # stream instead.
-            if have_sendfile:
+            # stream instead. Only TCP is used: os.sendfile is not portable over a UNIX
+            # domain socket (it is unsupported on macOS), and kTLS is TCP-only anyway.
+            if have_sendfile and socket.family in _SENDFILE_FAMILIES:
                 if tls_extension is None:
                     self._sendfile_socket = socket
                 else:
