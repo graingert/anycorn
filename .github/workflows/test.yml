@@ -64,21 +64,19 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Load the kernel TLS module
+        # kTLS needs the tls ULP loaded; only Linux has it. Loading needs privilege, but the
+        # (unprivileged) test process can then use it. Windows/macOS skip the kTLS tests.
+        if: runner.os == 'Linux'
+        run: sudo modprobe tls && cat /proc/sys/net/ipv4/tcp_available_ulp
       - name: Run tests
+        # ssl.OP_ENABLE_KTLS is exposed on CPython 3.12+, so kTLS is required there (and only
+        # on Linux). ANYCORN_REQUIRE_KTLS makes tests/e2e/test_ktls_real.py fail - not skip -
+        # if kTLS does not actually activate, so it is verified on every uv Python from 3.12
+        # up, catching a runner (or interpreter's OpenSSL) without working kTLS.
+        env:
+          ANYCORN_REQUIRE_KTLS: ${{ (runner.os == 'Linux' && matrix.python-version != '3.10' && matrix.python-version != '3.11') && '1' || '' }}
         run: uv run pytest
-      - name: Real kTLS test
-        # kTLS needs the kernel tls ULP and an OpenSSL built with ktls. The distro OpenSSL on
-        # the runner has it; uv's managed CPython may not, so this one test runs on the system
-        # interpreter, on a single Linux cell. ANYCORN_REQUIRE_KTLS makes it fail - not skip -
-        # if kTLS does not actually activate, so a runner without working kTLS is caught. Kept
-        # in this job rather than a separate one.
-        if: runner.os == 'Linux' && matrix.python-version == '3.12'
-        run: |
-          sudo modprobe tls
-          cat /proc/sys/net/ipv4/tcp_available_ulp
-          uv venv --python /usr/bin/python3 /tmp/ktls-venv
-          uv pip install --python /tmp/ktls-venv -e . httpx2 pytest trio trustme
-          ANYCORN_REQUIRE_KTLS=1 /tmp/ktls-venv/bin/pytest tests/e2e/test_ktls_real.py -v
 
 
   h2spec:
