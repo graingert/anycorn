@@ -7,7 +7,7 @@ from enum import Enum, auto
 from time import time
 from typing import TYPE_CHECKING
 
-from anycorn.sendfile import have_sendfile, read_file_chunks
+from anycorn.sendfile import read_file_chunks
 from anycorn.typing import (
     AppWrapper,
     ASGIReceiveEvent,
@@ -84,6 +84,8 @@ class HTTPStream:
         send: Callable[[Event], Awaitable[None]],
         stream_id: int,
         tls: TLSExtension | None,
+        *,
+        zero_copy_send: bool = False,
     ) -> None:
         """Initialize the HTTP stream handler."""
         self.app = app
@@ -103,6 +105,10 @@ class HTTPStream:
         self.stream_id = stream_id
         self.task_group = task_group
         self.tls = tls
+        # Whether the TCP server can really os.sendfile this connection's body: plaintext,
+        # or a TLS connection the kernel encrypts (kTLS). False means a read-and-send, so
+        # the zerocopysend extension is not advertised.
+        self.zero_copy_send = zero_copy_send
         self.scheme = "https" if self.tls is not None else "http"
 
     @property
@@ -142,11 +148,12 @@ class HTTPStream:
             # every HTTP version rather than being tied to h2/h3 features above.
             extensions["http.response.pathsend"] = {}
             # Zero copy send is only offered where it can really be zero copy: os.sendfile
-            # over a plaintext HTTP/1.1 socket. HTTP/2 and HTTP/3 frame the body, and a TLS
-            # connection encrypts it in userspace, so those are deliberately not advertised
-            # rather than silently falling back to a read-and-send. (Path send, whose
-            # contract is only that the server sends the file, stays offered everywhere.)
-            if event.http_version in SENDFILE_HTTP_VERSIONS and self.tls is None and have_sendfile:
+            # over an HTTP/1.1 socket the kernel can send unencrypted (plaintext) or encrypt
+            # itself (kTLS). HTTP/2 and HTTP/3 frame the body, and userspace TLS encrypts it
+            # in Python, so those are deliberately not advertised rather than silently falling
+            # back to a read-and-send. (Path send, whose contract is only that the server
+            # sends the file, stays offered everywhere.)
+            if event.http_version in SENDFILE_HTTP_VERSIONS and self.zero_copy_send:
                 extensions["http.response.zerocopysend"] = {}
 
             self.scope = HTTPScope(

@@ -12,6 +12,7 @@ import anyio.abc
 import anyio.streams.tls
 
 from .events import Closed, Event, RawData, SendFile, Updated
+from .ktls import KTLSAttribute
 from .protocol import ProtocolWrapper
 from .sendfile import have_sendfile, read_file_chunks, sendfile
 from .task_group import TaskGroup
@@ -66,10 +67,15 @@ class TCPServer:
             socket = self.stream.extra(anyio.abc.SocketAttribute.raw_socket)  # noqa: S610
             client = parse_socket_addr(socket.family, socket.getpeername())
             server = parse_socket_addr(socket.family, socket.getsockname())
-            # Real zero-copy send is only possible on a plaintext socket; on a TLS
-            # connection the body is read and encrypted through the stream instead.
-            if tls_extension is None and have_sendfile:
-                self._sendfile_socket = socket
+            # Real zero-copy send needs a socket the kernel can put the file bytes on
+            # directly: a plaintext socket, or a TLS one the kernel encrypts itself (kTLS).
+            # Userspace TLS encrypts in Python, so the body is read and sent through the
+            # stream instead.
+            if have_sendfile:
+                if tls_extension is None:
+                    self._sendfile_socket = socket
+                else:
+                    self._sendfile_socket = self._ktls_sendfile_socket()
 
             async with TaskGroup() as task_group:
                 self._task_group = task_group
@@ -84,6 +90,7 @@ class TCPServer:
                     self.protocol_send,
                     tls_extension,
                     alpn_protocol,
+                    zero_copy_send=self._sendfile_socket is not None,
                 )
                 await self.protocol.initiate()
                 await self.idle_task.restart(self._task_group, self._idle_timeout)
@@ -92,6 +99,18 @@ class TCPServer:
             pass
         finally:
             await self._close()
+
+    def _ktls_sendfile_socket(self) -> socket_module.socket | None:
+        """Return the socket to os.sendfile over when the kernel owns TLS send, else None.
+
+        Only a KTLSStream exposes this attribute, and only when kTLS actually activated;
+        an ordinary userspace TLS stream has no such attribute, so this stays None and the
+        body is read and encrypted through the stream as before.
+        """
+        try:
+            return self.stream.extra(KTLSAttribute.sendfile_socket)  # noqa: S610
+        except anyio.TypedAttributeLookupError:
+            return None
 
     async def protocol_send(self, event: Event) -> None:
         """Forward a protocol event to the underlying stream."""

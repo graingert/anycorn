@@ -66,6 +66,7 @@ async def _stream(config: Config, logs: LogCapture) -> HTTPStream:  # noqa: ARG0
         AsyncMock(),
         1,
         None,
+        zero_copy_send=have_sendfile,
     )
     stream.app_put = AsyncMock()
     return stream

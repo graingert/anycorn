@@ -141,6 +141,8 @@ class H11Protocol:
         server: tuple[str, int] | None,
         send: Callable[[Event], Awaitable[None]],
         tls: TLSExtension | None,
+        *,
+        zero_copy_send: bool = False,
     ) -> None:
         """Initialize the H11 protocol handler."""
         self.app = app
@@ -155,6 +157,7 @@ class H11Protocol:
         self.send = send
         self.server = server
         self.tls = tls
+        self.zero_copy_send = zero_copy_send
         self.stream: HTTPStream | WSStream | None = None
         self.task_group = task_group
         self.connection_state = connection_state
@@ -317,6 +320,7 @@ class H11Protocol:
                 self.stream_send,
                 STREAM_ID,
                 self.tls,
+                zero_copy_send=self.zero_copy_send,
             )
 
         if self.config.h11_pass_raw_headers:
