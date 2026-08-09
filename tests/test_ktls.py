@@ -28,10 +28,12 @@ from anycorn.app_wrappers import ASGIWrapper
 from anycorn.config import Config
 from anycorn.ktls import KTLSAttribute, KTLSStream, can_enable_ktls, enable_ktls
 from anycorn.run import worker_serve
+from anycorn.utils import build_tls_extension
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from anycorn.typing import TLSExtension
     from tests.conftest import TLSCerts
 
 # kTLS is Linux-only, and the socket-backed KTLSStream drives a non-blocking SSLSocket via
@@ -168,6 +170,68 @@ async def test_exposes_socket_and_tls_attributes(certificate_authority: trustme.
     assert tls_version is not None
     assert tls_version.startswith("TLS")
     assert family == socket.AF_UNIX
+
+
+@pytest.mark.anyio
+async def test_tls_extension_is_populated_over_ktls(
+    tmp_path: Path, certificate_authority: trustme.CA
+) -> None:
+    """build_tls_extension harvests version, cipher and the client cert from a KTLSStream.
+
+    KTLSStream exposes an ssl.SSLSocket rather than the ssl.SSLObject an in-memory TLS stream
+    gives, so this guards that the harvester still reads every field off it. The extension
+    reflects the negotiated session, not the send path, so it is the same whether or not kTLS
+    activates - which lets this run as userspace TLS in a sandbox without the kernel tls ULP.
+    """
+    server_cert = certificate_authority.issue_cert("localhost")
+    certfile = tmp_path / "cert.pem"
+    keyfile = tmp_path / "key.pem"
+    server_cert.cert_chain_pems[0].write_to_path(str(certfile))
+    server_cert.private_key_pem.write_to_path(str(keyfile))
+
+    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_ctx.load_cert_chain(str(certfile), str(keyfile))
+    server_ctx.verify_mode = ssl.CERT_REQUIRED  # ask the client for a certificate
+    certificate_authority.configure_trust(server_ctx)
+    enable_ktls(server_ctx)
+
+    client_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    certificate_authority.configure_trust(client_ctx)
+    certificate_authority.issue_cert("client@example.com").configure_cert(client_ctx)
+
+    server_sock, client_sock = socket.socketpair()
+    config = Config()
+    config.certfile = str(certfile)
+    extension: TLSExtension | None = None
+
+    async def run_server() -> None:
+        nonlocal extension
+        stream = await KTLSStream.wrap(server_sock, ssl_context=server_ctx)
+        extension = build_tls_extension(config, stream)
+        await stream.receive()
+        await stream.aclose()
+
+    async def run_client() -> None:
+        def talk() -> None:
+            client_sock.setblocking(True)  # noqa: FBT003
+            tls = client_ctx.wrap_socket(client_sock, server_hostname="localhost")
+            tls.sendall(b"hi")
+            tls.close()
+
+        await anyio.to_thread.run_sync(talk)
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(run_server)
+        task_group.start_soon(run_client)
+
+    assert extension is not None
+    assert extension["tls_version"] is not None
+    assert extension["cipher_suite"] is not None
+    assert extension["server_cert"] is not None
+    # The client presented a certificate the server trusts, so it is harvested with no error.
+    assert extension["client_cert_error"] is None
+    assert len(extension["client_cert_chain"]) == 1
+    assert extension["client_cert_name"] is not None
 
 
 def test_can_enable_ktls_matches_platform() -> None:
