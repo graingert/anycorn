@@ -212,10 +212,13 @@ async def _serve_tls_and_get(app: Any, tls_certs: TLSCerts) -> httpx2.Response: 
 
 @pytest.mark.anyio
 async def test_ktls_listener_serves_https(tls_certs: TLSCerts) -> None:
-    """worker_serve with use_ktls serves a whole HTTPS request; here as userspace TLS.
+    """worker_serve with use_ktls serves a whole HTTPS request over the KTLSListener.
 
-    Without the kernel tls ULP kTLS never activates, so the body is read and encrypted
-    through the stream and the zerocopysend extension is deliberately not offered.
+    Whether kTLS actually activates (and so whether zerocopysend is offered) depends on the
+    kernel tls ULP being available, which differs between machines, so this asserts only what
+    holds either way - the response is served correctly over TLS. The kTLS-active case, where
+    zerocopysend is offered and the body goes out with os.sendfile, is covered by
+    tests/e2e/test_ktls_real.py.
     """
     payload = b"hello over a kTLS-capable listener\n" * 100
     captured: dict[str, Any] = {}
@@ -237,13 +240,11 @@ async def test_ktls_listener_serves_https(tls_certs: TLSCerts) -> None:
     assert response.content == payload
     assert "tls" in captured["extensions"]
     assert captured["scheme"] == "https"
-    # Userspace TLS: a plaintext sendfile would leak, so zerocopysend must stay unadvertised.
-    assert "http.response.zerocopysend" not in captured["extensions"]
 
 
 @pytest.mark.anyio
-async def test_ktls_listener_pathsend_falls_back(tmp_path: Path, tls_certs: TLSCerts) -> None:
-    """Path send over a userspace-TLS connection reads and encrypts the file via the stream."""
+async def test_ktls_listener_serves_pathsend(tmp_path: Path, tls_certs: TLSCerts) -> None:
+    """Path send is delivered correctly over TLS, whether by kTLS os.sendfile or userspace."""
     payload = bytes(range(256)) * 200
     file_path = tmp_path / "payload.bin"
     await anyio.Path(file_path).write_bytes(payload)
