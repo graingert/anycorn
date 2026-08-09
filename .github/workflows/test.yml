@@ -64,7 +64,17 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Load the kernel TLS module
+        # Real kTLS needs the tls ULP. Only Linux has it; the kTLS test enforces activation
+        # where ANYCORN_REQUIRE_KTLS is set below, and is skipped everywhere else.
+        if: runner.os == 'Linux'
+        run: sudo modprobe tls && cat /proc/sys/net/ipv4/tcp_available_ulp
       - name: Run tests
+        # ssl.OP_ENABLE_KTLS is exposed only on CPython 3.12+, so kTLS is required only there
+        # (and only on Linux). When set, tests/e2e/test_ktls_real.py fails - not skips - if
+        # kTLS does not actually activate, so a runner without working kTLS is caught.
+        env:
+          ANYCORN_REQUIRE_KTLS: ${{ (runner.os == 'Linux' && matrix.python-version != '3.10' && matrix.python-version != '3.11') && '1' || '' }}
         run: uv run pytest
 
 
