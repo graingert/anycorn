@@ -112,5 +112,6 @@ class ProtocolWrapper:
                 zero_copy_send=self.zero_copy_send,
             )
             await self.protocol.initiate(error.headers, error.settings)
-            if error.data != b"":
-                return await self.protocol.handle(RawData(data=error.data))
+            # Replay whatever was pipelined behind the upgrade request; empty data is a
+            # harmless no-op for the HTTP/2 handler, so this needs no guard.
+            return await self.protocol.handle(RawData(data=error.data))
