@@ -11,8 +11,17 @@ import pytest
 
 import anycorn.protocol.h11
 from anycorn.config import Config
-from anycorn.events import Closed, RawData, Updated
-from anycorn.protocol.events import Body, Data, EndBody, EndData, Request, Response, StreamClosed
+from anycorn.events import Closed, RawData, SendFile, Updated
+from anycorn.protocol.events import (
+    Body,
+    Data,
+    EndBody,
+    EndData,
+    Request,
+    Response,
+    StreamClosed,
+    ZeroCopySend,
+)
 from anycorn.protocol.h11 import H2CProtocolRequiredError, H2ProtocolAssumedError, H11Protocol
 from anycorn.protocol.http_stream import HTTPStream
 from anycorn.protocol.ws_stream import WSStream
@@ -109,6 +118,33 @@ async def test_protocol_send_data(protocol: H11Protocol) -> None:
     await protocol.stream_send(Data(stream_id=1, data=b"hello"))
     protocol.send.assert_called()  # type: ignore[attr-defined]
     assert protocol.send.call_args_list == [call(RawData(data=b"hello"))]  # type: ignore[attr-defined]
+
+
+@pytest.mark.anyio
+async def test_protocol_zerocopysend_content_length(protocol: H11Protocol) -> None:
+    """A Content-Length body becomes a bare SendFile - no framing bytes around it."""
+    await protocol.stream_send(
+        Response(stream_id=1, status_code=200, headers=[(b"content-length", b"10")])
+    )
+    protocol.send.reset_mock()  # type: ignore[attr-defined]
+    await protocol.stream_send(ZeroCopySend(stream_id=1, file=7, offset=3, count=10))
+    # h11 kept the framing (decremented the Content-Length) but handed back the file.
+    assert protocol.send.call_args_list == [call(SendFile(file=7, offset=3, count=10))]  # type: ignore[attr-defined]
+
+
+@pytest.mark.anyio
+async def test_protocol_zerocopysend_chunked_wraps_with_framing(protocol: H11Protocol) -> None:
+    """Without a Content-Length h11 chunks, so the SendFile is wrapped by chunk framing."""
+    # A keep-alive HTTP/1.1 request, so h11 must chunk rather than close-delimit the body.
+    await protocol.handle(RawData(data=b"GET / HTTP/1.1\r\nHost: anycorn\r\n\r\n"))
+    await protocol.stream_send(Response(stream_id=1, status_code=200, headers=[]))
+    protocol.send.reset_mock()  # type: ignore[attr-defined]
+    await protocol.stream_send(ZeroCopySend(stream_id=1, file=7, offset=0, count=10))
+    assert protocol.send.call_args_list == [  # type: ignore[attr-defined]
+        call(RawData(data=b"a\r\n")),  # chunk size, 10 in hex
+        call(SendFile(file=7, offset=0, count=10)),
+        call(RawData(data=b"\r\n")),
+    ]
 
 
 @pytest.mark.anyio

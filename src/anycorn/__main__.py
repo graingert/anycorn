@@ -202,6 +202,11 @@ def _load_config(config_path: str | None) -> Config:
     type=int,
 )
 @click.option(
+    "--use-ktls",
+    help="Offload TLS to the kernel (kernel TLS) for zero-copy sends where available.",
+    is_flag=True,
+)
+@click.option(
     "--verify-mode",
     help="SSL verify mode for peer's certificate, see ssl.VerifyMode enum for possible values.",
     type=click.Choice(("CERT_NONE", "CERT_OPTIONAL", "CERT_REQUIRED")),
@@ -260,6 +265,7 @@ def main(  # noqa: C901 PLR0913 PLR0912 PLR0915
     statsd_prefix: str,
     umask: int | None,
     user: int | None,
+    use_ktls: bool,  # noqa: FBT001
     verify_mode: str | None,
     websocket_ping_interval: int | None,
     websocket_permessage_deflate: bool,  # noqa: FBT001
@@ -321,6 +327,7 @@ def main(  # noqa: C901 PLR0913 PLR0912 PLR0915
         cfg.umask = umask
     if user is not None:
         cfg.user = user
+    cfg.use_ktls = use_ktls
     if worker_class is not None:
         cfg.worker_class = worker_class
     if verify_mode is not None:

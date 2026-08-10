@@ -31,6 +31,8 @@ class ProtocolWrapper:
         send: Callable[[Event], Awaitable[None]],
         tls: TLSExtension | None,
         alpn_protocol: str | None = None,
+        *,
+        zero_copy_send: bool = False,
     ) -> None:
         """Initialize the protocol wrapper."""
         self.app = app
@@ -42,6 +44,7 @@ class ProtocolWrapper:
         self.send = send
         self.state = state
         self.tls = tls
+        self.zero_copy_send = zero_copy_send
         self.protocol: H11Protocol | H2Protocol
         if alpn_protocol == "h2":
             self.protocol = H2Protocol(
@@ -54,6 +57,7 @@ class ProtocolWrapper:
                 self.server,
                 self.send,
                 self.tls,
+                zero_copy_send=self.zero_copy_send,
             )
         else:
             self.protocol = H11Protocol(
@@ -66,6 +70,7 @@ class ProtocolWrapper:
                 self.server,
                 self.send,
                 self.tls,
+                zero_copy_send=self.zero_copy_send,
             )
 
     async def initiate(self) -> None:
@@ -87,6 +92,7 @@ class ProtocolWrapper:
                 self.server,
                 self.send,
                 self.tls,
+                zero_copy_send=self.zero_copy_send,
             )
             await self.protocol.initiate()
             if error.data != b"":
@@ -102,6 +108,7 @@ class ProtocolWrapper:
                 self.server,
                 self.send,
                 self.tls,
+                zero_copy_send=self.zero_copy_send,
             )
             await self.protocol.initiate(error.headers, error.settings)
             if error.data != b"":

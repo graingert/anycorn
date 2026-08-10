@@ -149,6 +149,12 @@ class Config:
     statsd_host: str | None = None
     statsd_prefix = ""
     umask: int | None = None
+    # Bind TLS to the accepted socket and ask OpenSSL to enable kernel TLS, so a TLS
+    # response body can still be sent with os.sendfile (the zerocopysend/pathsend
+    # extensions). Only takes effect on Linux with an OpenSSL that supports kTLS; where it
+    # cannot, TLS is still served, just in userspace. Off by default as it replaces anyio's
+    # TLS handling with a socket-backed implementation.
+    use_ktls = False
     use_reloader = False
     user: int | None = None
     verify_flags: VerifyFlags | None = None

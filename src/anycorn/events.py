@@ -28,3 +28,18 @@ class Updated(Event):
     """Event signalling a protocol state change."""
 
     idle: bool
+
+
+@dataclass(frozen=True)
+class SendFile(Event):
+    """Event asking the connection to transmit a file descriptor with zero copy.
+
+    Emitted by the HTTP/1.1 protocol for the ``http.response.zerocopysend`` extension:
+    the framing bytes go out as ``RawData`` and the body itself as this, so the TCP
+    server can ``os.sendfile`` it straight from the file to the socket (or read and
+    send it through the TLS stream when the connection is encrypted).
+    """
+
+    file: int
+    offset: int
+    count: int

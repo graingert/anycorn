@@ -21,6 +21,7 @@ import anyio.streams.tls
 import sniffio
 
 from .datagram import wrap_datagram_socket
+from .ktls import KTLSListener, can_enable_ktls, enable_ktls
 from .lifespan import Lifespan
 from .statsd import StatsdLogger
 from .tcp_server import tcp_server_handler
@@ -254,16 +255,31 @@ async def worker_serve(  # noqa: C901, PLR0912, PLR0915
                     sock.listen(config.backlog)
 
             ssl_context = config.create_ssl_context()
-            listeners: list[anyio.abc.SocketListener | anyio.streams.tls.TLSListener] = []
+            use_ktls = config.use_ktls and can_enable_ktls
+            if config.use_ktls and not can_enable_ktls:
+                await config.log.warning(
+                    "use_ktls is set but kernel TLS is unavailable here; serving userspace TLS"
+                )
+            if use_ktls and ssl_context is not None:
+                enable_ktls(ssl_context)
+            listeners: list[
+                anyio.abc.SocketListener | anyio.streams.tls.TLSListener | KTLSListener
+            ] = []
             binds = []
             for secure_sock in sockets.secure_sockets:
                 assert ssl_context is not None
-                secure_listener = anyio.streams.tls.TLSListener(
-                    await anyio.abc.SocketListener.from_socket(secure_sock),
-                    ssl_context,
-                    True,  # noqa: FBT003
-                    config.ssl_handshake_timeout,
-                )
+                secure_listener: anyio.streams.tls.TLSListener | KTLSListener
+                if use_ktls:
+                    secure_listener = KTLSListener(
+                        secure_sock, ssl_context, config.ssl_handshake_timeout
+                    )
+                else:
+                    secure_listener = anyio.streams.tls.TLSListener(
+                        await anyio.abc.SocketListener.from_socket(secure_sock),
+                        ssl_context,
+                        True,  # noqa: FBT003
+                        config.ssl_handshake_timeout,
+                    )
                 listeners.append(await socket_stack.enter_async_context(secure_listener))
                 bind = repr_socket_addr(secure_sock.family, secure_sock.getsockname())
                 url = f"https://{bind}"

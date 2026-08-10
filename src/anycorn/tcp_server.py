@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 from math import inf
+from socket import AF_INET, AF_INET6
 from ssl import SSLZeroReturnError
 from typing import TYPE_CHECKING
 
@@ -11,19 +12,27 @@ import anyio
 import anyio.abc
 import anyio.streams.tls
 
-from .events import Closed, Event, RawData, Updated
+from .events import Closed, Event, RawData, SendFile, Updated
+from .ktls import KTLSAttribute
 from .protocol import ProtocolWrapper
+from .sendfile import have_sendfile, read_file_chunks, sendfile
 from .task_group import TaskGroup
 from .typing import AppWrapper, ConnectionState, LifespanState
 from .utils import build_tls_extension, parse_socket_addr
 from .worker_context import AnyioSingleTask, WorkerContext
 
 if TYPE_CHECKING:
+    import socket as socket_module
     from collections.abc import Callable
 
     from .config import Config
 
 MAX_RECV = 2**16
+
+# os.sendfile is only used over TCP: it is unsupported over a UNIX domain socket on macOS,
+# and kTLS (the TLS send path) is TCP-only, so a UNIX-socket connection reads and sends
+# through the stream instead.
+_SENDFILE_FAMILIES = frozenset({AF_INET, AF_INET6})
 
 
 class TCPServer:
@@ -47,6 +56,9 @@ class TCPServer:
         self.stream = stream
 
         self._idle_handle: anyio.CancelScope | None = None
+        # The raw socket to os.sendfile over, set once the connection is known to be
+        # plaintext (a TLS stream encrypts in userspace, so it cannot be zero copy).
+        self._sendfile_socket: socket_module.socket | None = None
 
     async def run(self) -> None:
         """Run the server for this connection."""
@@ -61,6 +73,16 @@ class TCPServer:
             socket = self.stream.extra(anyio.abc.SocketAttribute.raw_socket)  # noqa: S610
             client = parse_socket_addr(socket.family, socket.getpeername())
             server = parse_socket_addr(socket.family, socket.getsockname())
+            # Real zero-copy send needs a socket the kernel can put the file bytes on
+            # directly: a plaintext socket, or a TLS one the kernel encrypts itself (kTLS).
+            # Userspace TLS encrypts in Python, so the body is read and sent through the
+            # stream instead. Only TCP is used: os.sendfile is not portable over a UNIX
+            # domain socket (it is unsupported on macOS), and kTLS is TCP-only anyway.
+            if have_sendfile and socket.family in _SENDFILE_FAMILIES:
+                if tls_extension is None:
+                    self._sendfile_socket = socket
+                else:
+                    self._sendfile_socket = self._ktls_sendfile_socket()
 
             async with TaskGroup() as task_group:
                 self._task_group = task_group
@@ -75,6 +97,7 @@ class TCPServer:
                     self.protocol_send,
                     tls_extension,
                     alpn_protocol,
+                    zero_copy_send=self._sendfile_socket is not None,
                 )
                 await self.protocol.initiate()
                 await self.idle_task.restart(self._task_group, self._idle_timeout)
@@ -83,6 +106,18 @@ class TCPServer:
             pass
         finally:
             await self._close()
+
+    def _ktls_sendfile_socket(self) -> socket_module.socket | None:
+        """Return the socket to os.sendfile over when the kernel owns TLS send, else None.
+
+        Only a KTLSStream exposes this attribute, and only when kTLS actually activated;
+        an ordinary userspace TLS stream has no such attribute, so this stays None and the
+        body is read and encrypted through the stream as before.
+        """
+        try:
+            return self.stream.extra(KTLSAttribute.sendfile_socket)  # noqa: S610
+        except anyio.TypedAttributeLookupError:
+            return None
 
     async def protocol_send(self, event: Event) -> None:
         """Forward a protocol event to the underlying stream."""
@@ -93,6 +128,18 @@ class TCPServer:
                         await self.stream.send(event.data)
                 except (anyio.ClosedResourceError, anyio.BrokenResourceError, TimeoutError):
                     await self.protocol.handle(Closed())
+        elif isinstance(event, SendFile):
+            async with self.send_lock:
+                try:
+                    with anyio.CancelScope(shield=True):
+                        await self._transmit_file(event)
+                except (
+                    anyio.ClosedResourceError,
+                    anyio.BrokenResourceError,
+                    TimeoutError,
+                    OSError,
+                ):
+                    await self.protocol.handle(Closed())
         elif isinstance(event, Closed):
             await self._close()
             await self.protocol.handle(Closed())
@@ -101,6 +148,16 @@ class TCPServer:
                 await self.idle_task.restart(self._task_group, self._idle_timeout)
             else:
                 await self.idle_task.stop()
+
+    async def _transmit_file(self, event: SendFile) -> None:
+        """Send a file body, with a zero-copy os.sendfile where the socket allows it."""
+        if self._sendfile_socket is not None:
+            await sendfile(self._sendfile_socket, event.file, event.offset, event.count)
+        else:
+            # A TLS connection (or a platform without sendfile): read the window and send
+            # it through the stream, which encrypts it as any other body bytes.
+            async for chunk in read_file_chunks(event.file, event.offset, event.count):
+                await self.stream.send(chunk)
 
     async def _read_data(self) -> None:
         while True:

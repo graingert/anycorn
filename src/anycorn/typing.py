@@ -62,6 +62,7 @@ Extensions = TypedDict(
         "tls": TLSExtension,
         "http.response.push": Mapping[str, Any],
         "http.response.pathsend": Mapping[str, Any],
+        "http.response.zerocopysend": Mapping[str, Any],
         "http.response.trailers": Mapping[str, Any],
         "http.response.early_hint": Mapping[str, Any],
         "websocket.http.response": Mapping[str, Any],
@@ -173,6 +174,16 @@ class HTTPResponsePathSendEvent(TypedDict):
 
     type: Literal["http.response.pathsend"]
     path: str
+
+
+class HTTPResponseZeroCopySendEvent(TypedDict):
+    """ASGI HTTP zero copy send event (``http.response.zerocopysend`` extension)."""
+
+    type: Literal["http.response.zerocopysend"]
+    file: Any
+    offset: NotRequired[int]
+    count: NotRequired[int]
+    more_body: NotRequired[bool]
 
 
 class HTTPDisconnectEvent(TypedDict):
@@ -298,6 +309,7 @@ ASGISendEvent = (
     | HTTPServerPushEvent
     | HTTPEarlyHintEvent
     | HTTPResponsePathSendEvent
+    | HTTPResponseZeroCopySendEvent
     | HTTPDisconnectEvent
     | WebsocketAcceptEvent
     | WebsocketSendEvent
