@@ -197,7 +197,8 @@ async def test_tls_extension_is_populated_over_ktls(
 
     client_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     certificate_authority.configure_trust(client_ctx)
-    certificate_authority.issue_cert("client@example.com").configure_cert(client_ctx)
+    client_cert = certificate_authority.issue_cert("client@example.com")
+    client_cert.configure_cert(client_ctx)
 
     server_sock, client_sock = socket.socketpair()
     config = Config()
@@ -230,12 +231,16 @@ async def test_tls_extension_is_populated_over_ktls(
     assert extension["server_cert"] is not None
     # The client presented a certificate the server trusts, so it is harvested with no error.
     assert extension["client_cert_error"] is None
-    # get_verified_chain (CPython 3.13+) returns the full chain - client leaf and CA - while
-    # older Pythons fall back to getpeercert and return the leaf alone.
-    expected_chain_length = 2 if sys.version_info >= (3, 13) else 1
-    assert len(extension["client_cert_chain"]) == expected_chain_length
-    assert all("BEGIN CERTIFICATE" in pem for pem in extension["client_cert_chain"])
+    # The harvested chain is exactly the certificates the client presented, compared by DER so
+    # PEM formatting does not matter. get_verified_chain (CPython 3.13+) returns the client leaf
+    # followed by the issuing CA; older Pythons' getpeercert fallback returns the leaf alone.
+    client_leaf = ssl.PEM_cert_to_DER_cert(client_cert.cert_chain_pems[0].bytes().decode())
+    issuing_ca = ssl.PEM_cert_to_DER_cert(certificate_authority.cert_pem.bytes().decode())
+    chain = [ssl.PEM_cert_to_DER_cert(pem) for pem in extension["client_cert_chain"]]
+    assert chain == ([client_leaf, issuing_ca] if sys.version_info >= (3, 13) else [client_leaf])
+    # client_cert_name is the leaf subject's RFC 4514 DN; trustme signs it under its own org.
     assert extension["client_cert_name"] is not None
+    assert "O=trustme" in extension["client_cert_name"]
 
 
 def test_can_enable_ktls_matches_platform() -> None:
