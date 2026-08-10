@@ -230,8 +230,10 @@ async def test_tls_extension_is_populated_over_ktls(
     assert extension["server_cert"] is not None
     # The client presented a certificate the server trusts, so it is harvested with no error.
     assert extension["client_cert_error"] is None
-    # At least the client leaf; newer Pythons (get_verified_chain) also include the CA.
-    assert len(extension["client_cert_chain"]) >= 1
+    # get_verified_chain (CPython 3.13+) returns the full chain - client leaf and CA - while
+    # older Pythons fall back to getpeercert and return the leaf alone.
+    expected_chain_length = 2 if sys.version_info >= (3, 13) else 1
+    assert len(extension["client_cert_chain"]) == expected_chain_length
     assert all("BEGIN CERTIFICATE" in pem for pem in extension["client_cert_chain"])
     assert extension["client_cert_name"] is not None
 
