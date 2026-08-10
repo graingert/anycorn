@@ -23,6 +23,7 @@ import pytest
 import trustme
 from anyio.abc import SocketAttribute
 from anyio.streams.tls import TLSAttribute
+from cryptography import x509
 
 from anycorn.app_wrappers import ASGIWrapper
 from anycorn.config import Config
@@ -42,6 +43,9 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="kTLS and its socket-backed TLS stream are Linux-only"
 )
+
+TLS_VERSION_1_3 = 0x0304  # RFC 8446
+TLS_1_3_CIPHER_SUITES = frozenset({0x1301, 0x1302, 0x1303})  # AES-128/256-GCM, ChaCha20
 
 
 @pytest.fixture
@@ -199,6 +203,7 @@ async def test_tls_extension_is_populated_over_ktls(
     certificate_authority.configure_trust(client_ctx)
     client_cert = certificate_authority.issue_cert("client@example.com")
     client_cert.configure_cert(client_ctx)
+    client_ctx.minimum_version = ssl.TLSVersion.TLSv1_3  # so the negotiated version is exact
 
     server_sock, client_sock = socket.socketpair()
     config = Config()
@@ -226,21 +231,26 @@ async def test_tls_extension_is_populated_over_ktls(
         task_group.start_soon(run_client)
 
     assert extension is not None
-    assert extension["tls_version"] is not None
-    assert extension["cipher_suite"] is not None
-    assert extension["server_cert"] is not None
+    server_leaf = ssl.PEM_cert_to_DER_cert(server_cert.cert_chain_pems[0].bytes().decode())
+    client_leaf = ssl.PEM_cert_to_DER_cert(client_cert.cert_chain_pems[0].bytes().decode())
+    issuing_ca = ssl.PEM_cert_to_DER_cert(certificate_authority.cert_pem.bytes().decode())
+    expected_client_name = x509.load_pem_x509_certificate(
+        client_cert.cert_chain_pems[0].bytes()
+    ).subject.rfc4514_string()
+
+    assert extension["tls_version"] == TLS_VERSION_1_3
+    assert extension["cipher_suite"] in TLS_1_3_CIPHER_SUITES
+    server_cert_pem = extension["server_cert"]
+    assert server_cert_pem is not None
+    assert ssl.PEM_cert_to_DER_cert(server_cert_pem) == server_leaf
     # The client presented a certificate the server trusts, so it is harvested with no error.
     assert extension["client_cert_error"] is None
+    assert extension["client_cert_name"] == expected_client_name
     # The harvested chain is exactly the certificates the client presented, compared by DER so
     # PEM formatting does not matter. get_verified_chain (CPython 3.13+) returns the client leaf
     # followed by the issuing CA; older Pythons' getpeercert fallback returns the leaf alone.
-    client_leaf = ssl.PEM_cert_to_DER_cert(client_cert.cert_chain_pems[0].bytes().decode())
-    issuing_ca = ssl.PEM_cert_to_DER_cert(certificate_authority.cert_pem.bytes().decode())
     chain = [ssl.PEM_cert_to_DER_cert(pem) for pem in extension["client_cert_chain"]]
     assert chain == ([client_leaf, issuing_ca] if sys.version_info >= (3, 13) else [client_leaf])
-    # client_cert_name is the leaf subject's RFC 4514 DN; trustme signs it under its own org.
-    assert extension["client_cert_name"] is not None
-    assert "O=trustme" in extension["client_cert_name"]
 
 
 def test_can_enable_ktls_matches_platform() -> None:
