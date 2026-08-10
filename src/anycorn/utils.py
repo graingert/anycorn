@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from enum import Enum
     from multiprocessing.synchronize import Event as EventType
 
-    from anyio.abc import SocketStream
+    from anyio import TypedAttributeProvider
 
     from .config import Config
     from .protocol.events import Request
@@ -273,7 +273,9 @@ def _subject_to_rfc4514(subject: Iterable[Iterable[tuple[str, str]]]) -> str | N
     return ",".join(rdns) if rdns else None
 
 
-def build_tls_extension(config: Config, stream: SocketStream) -> TLSExtension:  # noqa: C901, PLR0912
+def build_tls_extension(  # noqa: C901, PLR0912
+    config: Config, stream: TypedAttributeProvider
+) -> TLSExtension:
     """Extract TLS parameters for the ASGI connection scope.
 
     Harvest information from AnyIO's TLS attributes and Python's ``ssl`` library:

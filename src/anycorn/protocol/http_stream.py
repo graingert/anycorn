@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from enum import Enum, auto
 from time import time
 from typing import TYPE_CHECKING
 
-import anyio
-
+from anycorn.sendfile import read_file_chunks
 from anycorn.typing import (
     AppWrapper,
     ASGIReceiveEvent,
@@ -40,6 +40,7 @@ from .events import (
     Response,
     StreamClosed,
     Trailers,
+    ZeroCopySend,
 )
 
 if TYPE_CHECKING:
@@ -50,7 +51,9 @@ if TYPE_CHECKING:
 TRAILERS_VERSIONS = {"2", "3"}
 PUSH_VERSIONS = {"2", "3"}
 EARLY_HINTS_VERSIONS = {"2", "3"}
-PATHSEND_CHUNK_SIZE = 65536
+# HTTP/1.1 gives a body a byte range on the wire, so it can be handed to os.sendfile.
+# HTTP/2 and HTTP/3 frame the body, so they read the file and send it as normal data.
+SENDFILE_HTTP_VERSIONS = {"1.0", "1.1"}
 
 
 class ASGIHTTPState(Enum):
@@ -81,6 +84,8 @@ class HTTPStream:
         send: Callable[[Event], Awaitable[None]],
         stream_id: int,
         tls: TLSExtension | None,
+        *,
+        zero_copy_send: bool = False,
     ) -> None:
         """Initialize the HTTP stream handler."""
         self.app = app
@@ -100,6 +105,10 @@ class HTTPStream:
         self.stream_id = stream_id
         self.task_group = task_group
         self.tls = tls
+        # Whether the TCP server can really os.sendfile this connection's body: plaintext,
+        # or a TLS connection the kernel encrypts (kTLS). False means a read-and-send, so
+        # the zerocopysend extension is not advertised.
+        self.zero_copy_send = zero_copy_send
         self.scheme = "https" if self.tls is not None else "http"
 
     @property
@@ -138,6 +147,14 @@ class HTTPStream:
             # Path send just streams a file from disk as the body, so it works on
             # every HTTP version rather than being tied to h2/h3 features above.
             extensions["http.response.pathsend"] = {}
+            # Zero copy send is only offered where it can really be zero copy: os.sendfile
+            # over an HTTP/1.1 socket the kernel can send unencrypted (plaintext) or encrypt
+            # itself (kTLS). HTTP/2 and HTTP/3 frame the body, and userspace TLS encrypts it
+            # in Python, so those are deliberately not advertised rather than silently falling
+            # back to a read-and-send. (Path send, whose contract is only that the server
+            # sends the file, stays offered everywhere.)
+            if event.http_version in SENDFILE_HTTP_VERSIONS and self.zero_copy_send:
+                extensions["http.response.zerocopysend"] = {}
 
             self.scope = HTTPScope(
                 type="http",
@@ -261,6 +278,21 @@ class HTTPStream:
         elif message["type"] == "http.response.pathsend" and self.state == ASGIHTTPState.RESPONSE:
             await self._send_pathsend(message["path"])
         elif (
+            message["type"] == "http.response.zerocopysend" and self.state == ASGIHTTPState.RESPONSE
+        ):
+            fileno = message["file"].fileno()
+            offset = message.get("offset")
+            if offset is None:
+                # os.sendfile with an explicit offset never advances the file, so start
+                # from where the descriptor currently is, as the spec's default means.
+                offset = os.lseek(fileno, 0, os.SEEK_CUR)
+            count = message.get("count")
+            if count is None:
+                count = os.fstat(fileno).st_size - offset
+            await self._send_zerocopy_body(
+                fileno, offset, count, more_body=message.get("more_body", False)
+            )
+        elif (
             message["type"] == "http.response.trailers"
             and self.scope["http_version"] in TRAILERS_VERSIONS
             and self.state == ASGIHTTPState.REQUEST
@@ -306,18 +338,38 @@ class HTTPStream:
             raise UnexpectedMessageError(self.state, message["type"])
 
     async def _send_pathsend(self, path: str) -> None:
-        # Path send names a file the app has already set Content-Length for; the
-        # server reads it out as the body. It is the terminal body message, so it
-        # finishes the response exactly as an http.response.body with more_body False.
+        # Path send names a file the app has already set Content-Length for; unlike
+        # zerocopysend the server owns the descriptor, opening and closing it. It routes
+        # through the same zero-copy body, so it too is os.sendfile on plaintext HTTP/1.1.
+        # It is the terminal body message, hence more_body is False.
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            count = os.fstat(fd).st_size
+            await self._send_zerocopy_body(fd, 0, count, more_body=False)
+        finally:
+            os.close(fd)
+
+    async def _send_zerocopy_body(
+        self, fileno: int, offset: int, count: int, *, more_body: bool
+    ) -> None:
+        # os.sendfile on plaintext HTTP/1.1 (the ZeroCopySend event, which the TCP server
+        # turns into a real zero-copy send or, on a TLS connection, a read-and-send); every
+        # other version reads the window and frames it as an ordinary body. Either way this
+        # is a body message, so it finishes the response when more_body is False.
         if not suppress_body(self.scope["method"], int(self.response["status"])):
-            async with await anyio.open_file(path, "rb") as file_:
-                while chunk := await file_.read(PATHSEND_CHUNK_SIZE):
+            if self.scope["http_version"] in SENDFILE_HTTP_VERSIONS:
+                await self.send(
+                    ZeroCopySend(stream_id=self.stream_id, file=fileno, offset=offset, count=count)
+                )
+            else:
+                async for chunk in read_file_chunks(fileno, offset, count):
                     await self.send(Body(stream_id=self.stream_id, data=chunk))
 
-        if self.response.get("trailers", False):
-            self.state = ASGIHTTPState.TRAILERS
-        else:
-            await self._send_closed()
+        if not more_body:
+            if self.response.get("trailers", False):
+                self.state = ASGIHTTPState.TRAILERS
+            else:
+                await self._send_closed()
 
     async def _send_closed(self) -> None:
         # Mark CLOSED before the first await: a StreamClosed event handled while

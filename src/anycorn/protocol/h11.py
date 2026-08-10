@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, cast
 
 import h11
 
-from anycorn.events import Closed, Event, RawData, Updated
+from anycorn.events import Closed, Event, RawData, SendFile, Updated
 
 from .events import (
     Body,
@@ -18,6 +18,7 @@ from .events import (
     Request,
     Response,
     StreamClosed,
+    ZeroCopySend,
 )
 from .events import (
     Event as StreamEvent,
@@ -39,6 +40,26 @@ if TYPE_CHECKING:
     )
 
 STREAM_ID = 1
+
+
+class _FilePlaceholder:
+    """Stands in for a file's bytes in an h11 Data event for a zero-copy send.
+
+    h11's ``send_with_data_passthrough`` returns the exact object passed as the Data,
+    so passing this - which reports the byte count via ``__len__`` so h11 frames it
+    correctly - lets the body be transmitted with ``os.sendfile`` instead of read into
+    memory. See :meth:`H11Protocol._send_zerocopy`.
+    """
+
+    __slots__ = ("count", "file", "offset")
+
+    def __init__(self, file: int, offset: int, count: int) -> None:
+        self.file = file
+        self.offset = offset
+        self.count = count
+
+    def __len__(self) -> int:
+        return self.count
 
 
 class H2CProtocolRequiredError(Exception):
@@ -120,6 +141,8 @@ class H11Protocol:
         server: tuple[str, int] | None,
         send: Callable[[Event], Awaitable[None]],
         tls: TLSExtension | None,
+        *,
+        zero_copy_send: bool = False,
     ) -> None:
         """Initialize the H11 protocol handler."""
         self.app = app
@@ -134,6 +157,7 @@ class H11Protocol:
         self.send = send
         self.server = server
         self.tls = tls
+        self.zero_copy_send = zero_copy_send
         self.stream: HTTPStream | WSStream | None = None
         self.task_group = task_group
         self.connection_state = connection_state
@@ -150,7 +174,7 @@ class H11Protocol:
             if self.stream is not None:
                 await self._close_stream()
 
-    async def stream_send(self, event: StreamEvent) -> None:
+    async def stream_send(self, event: StreamEvent) -> None:  # noqa: C901
         """Send a stream event back to the client."""
         if isinstance(event, Response):
             if event.status_code >= 200:  # noqa: PLR2004
@@ -174,6 +198,8 @@ class H11Protocol:
             pass  # Ignore for HTTP/1
         elif isinstance(event, Body):
             await self._send_h11_event(h11.Data(data=event.data))
+        elif isinstance(event, ZeroCopySend):
+            await self._send_zerocopy(event)
         elif isinstance(event, EndBody):
             await self._send_h11_event(h11.EndOfMessage())
         elif isinstance(event, Data):
@@ -182,6 +208,30 @@ class H11Protocol:
             pass
         elif isinstance(event, StreamClosed):
             await self._maybe_recycle()
+
+    async def _send_zerocopy(self, event: ZeroCopySend) -> None:
+        # Pass a placeholder to h11 instead of the body bytes: h11 keeps the framing
+        # right (decrementing the Content-Length, or writing the chunk size) but returns
+        # the placeholder in the byte list rather than reading the file. Its framing goes
+        # out as RawData and the placeholder becomes a SendFile the TCP server fulfils.
+        # https://h11.readthedocs.io/en/latest/api.html#sendfile
+        placeholder = _FilePlaceholder(event.file, event.offset, event.count)
+        # ZeroCopySend only reaches an HTTP stream, so this is the h11.Connection rather
+        # than the websocket adapter. The placeholder is intentionally not bytes, and
+        # passthrough hands it back unchanged rather than reading it.
+        assert isinstance(self.connection, h11.Connection)
+        h11_data = h11.Data(data=placeholder)  # type: ignore[arg-type]
+        try:
+            data_list = self.connection.send_with_data_passthrough(h11_data)
+        except h11.LocalProtocolError:
+            if self.connection.their_state != h11.ERROR:
+                raise
+        else:
+            for item in data_list or ():
+                if isinstance(item, _FilePlaceholder):
+                    await self.send(SendFile(file=item.file, offset=item.offset, count=item.count))
+                else:
+                    await self.send(RawData(data=item))
 
     async def _handle_events(self) -> None:  # noqa: C901
         while True:
@@ -270,6 +320,7 @@ class H11Protocol:
                 self.stream_send,
                 STREAM_ID,
                 self.tls,
+                zero_copy_send=self.zero_copy_send,
             )
 
         if self.config.h11_pass_raw_headers:

@@ -119,6 +119,8 @@ class H2Protocol:
         server: tuple[str, int] | None,
         send: Callable[[Event], Awaitable[None]],
         tls: TLSExtension | None,
+        *,
+        zero_copy_send: bool = False,
     ) -> None:
         """Initialize the H2 protocol handler."""
         self.app = app
@@ -129,6 +131,9 @@ class H2Protocol:
         self.task_group = task_group
         self.connection_state = connection_state
         self.tls = tls
+        # HTTP/2 frames the body so it never does a real os.sendfile; carried only to keep
+        # the stream constructor uniform with HTTP/1.1, where the extension is advertised.
+        self.zero_copy_send = zero_copy_send
 
         self.connection = h2.connection.H2Connection(
             config=h2.config.H2Configuration(client_side=False, header_encoding=None)
@@ -395,6 +400,7 @@ class H2Protocol:
                 self.stream_send,
                 request.stream_id,
                 self.tls,
+                zero_copy_send=self.zero_copy_send,
             )
         self.stream_buffers[request.stream_id] = StreamBuffer(self.context.event_class)
         try:

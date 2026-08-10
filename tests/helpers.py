@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 from contextlib import AsyncExitStack, asynccontextmanager
 from copy import deepcopy
 from json import dumps
@@ -28,6 +29,25 @@ if TYPE_CHECKING:
     from anycorn.typing import ASGIReceiveCallable, ASGISendCallable, Scope, WWWScope
 
 SANITY_BODY = b"Hello Anycorn"
+
+
+def tcp_socket_pair() -> tuple[socket.socket, socket.socket]:
+    """Return two connected loopback TCP sockets, like ``socket.socketpair()`` but AF_INET.
+
+    The sendfile tests need a real socket to ``os.sendfile`` over. ``socket.socketpair()``
+    gives an ``AF_UNIX`` pair, which ``os.sendfile`` does not support on macOS, whereas it
+    serves network sockets on every platform that has it - so the tests connect over TCP.
+    A blocking ``connect`` before ``accept`` is fine for loopback: the kernel completes the
+    handshake into the listen backlog, so ``connect`` returns without ``accept`` running.
+    """
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    with listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client.connect(listener.getsockname())
+        server, _ = listener.accept()
+    return server, client
 
 
 class MockSocket:

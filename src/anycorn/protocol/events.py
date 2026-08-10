@@ -43,6 +43,21 @@ class EndBody(Event):
 
 
 @dataclass(frozen=True)
+class ZeroCopySend(Event):
+    """A response body chunk to be sent from a file descriptor with zero copy.
+
+    Emitted for the ``http.response.zerocopysend`` extension (and used by path send)
+    on HTTP/1.1, where the framing lets the body be handed to ``os.sendfile``. ``file``
+    is a file descriptor, and ``offset``/``count`` are already resolved to the concrete
+    window to send.
+    """
+
+    file: int
+    offset: int
+    count: int
+
+
+@dataclass(frozen=True)
 class Trailers(Event):
     """Represents HTTP trailers sent after the body."""
 
