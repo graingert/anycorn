@@ -185,14 +185,9 @@ def tls_version_to_int(value: str | int | None) -> int | None:
             return mapping
         if value.startswith(_TLS_VERSION_PREFIX):
             version = value[len(_TLS_VERSION_PREFIX) :]
-            if version == "1":
-                return _TLS_VERSION_MAP["TLSv1"]
-            try:
-                major, _, minor = version.partition(".")
-                if major == "1" and minor.isdigit():
-                    return 0x0300 + int(minor) + 1
-            except ValueError:
-                return None
+            major, _, minor = version.partition(".")
+            if major == "1" and minor.isdigit():
+                return 0x0300 + int(minor) + 1
     return None
 
 
@@ -335,20 +330,22 @@ def build_tls_extension(  # noqa: C901, PLR0912
     else:
         extension["client_cert_chain"] = ()
 
-    if extension["client_cert_name"] is None:
-        try:
-            peer_certificate = stream.extra(TLSAttribute.peer_certificate)  # noqa: S610
-        except TypedAttributeLookupError:
-            peer_certificate = None
-        if peer_certificate and "subject" in peer_certificate:
-            extension["client_cert_name"] = _subject_to_rfc4514(
-                cast("Iterable[Iterable[tuple[str, str]]]", peer_certificate["subject"])
-            )
+    try:
+        peer_certificate = stream.extra(TLSAttribute.peer_certificate)  # noqa: S610
+    except TypedAttributeLookupError:
+        peer_certificate = None
+    if peer_certificate and "subject" in peer_certificate:
+        extension["client_cert_name"] = _subject_to_rfc4514(
+            cast("Iterable[Iterable[tuple[str, str]]]", peer_certificate["subject"])
+        )
 
     if extension["client_cert_name"] is None and isinstance(ssl_object, ssl.SSLObject):
         try:
             cert_dict = ssl_object.getpeercert()
-        except (ssl.SSLError, ValueError):
+        except (
+            ssl.SSLError,
+            ValueError,
+        ):  # pragma: no cover - defensive; not raised post-handshake
             cert_dict = None
         if cert_dict and "subject" in cert_dict:
             extension["client_cert_name"] = _subject_to_rfc4514(
