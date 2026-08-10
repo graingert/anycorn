@@ -135,6 +135,28 @@ def test_quic_bind_cli_omitted_preserves_default(monkeypatch: MonkeyPatch) -> No
     assert config.quic_bind == []
 
 
+def test_use_ktls_cli_flag(monkeypatch: MonkeyPatch) -> None:
+    runner = CliRunner()
+    run_multiple = Mock()
+    monkeypatch.setattr(anycorn.__main__, "run", run_multiple)
+
+    runner.invoke(anycorn.__main__.main, ["--use-ktls", "asgi:App"])
+    run_multiple.assert_called()
+    config = run_multiple.call_args_list[0][0][0]
+    assert config.use_ktls is True
+
+
+def test_use_ktls_cli_omitted_defaults_off(monkeypatch: MonkeyPatch) -> None:
+    runner = CliRunner()
+    run_multiple = Mock()
+    monkeypatch.setattr(anycorn.__main__, "run", run_multiple)
+
+    runner.invoke(anycorn.__main__.main, ["asgi:App"])
+    run_multiple.assert_called()
+    config = run_multiple.call_args_list[0][0][0]
+    assert config.use_ktls is False
+
+
 def test_verify_mode_conversion(monkeypatch: MonkeyPatch) -> None:
     runner = CliRunner()
     run_multiple = Mock()
