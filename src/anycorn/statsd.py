@@ -127,17 +127,19 @@ class StatsdLogger(BaseStatsdLogger):
         self._sender_lock = anyio.Lock()
 
     async def _socket_send(self, message: bytes) -> None:
-        if self._sender is None:
-            # Guard the lazy open: without the lock two coroutines emitting their
-            # first metric concurrently would each open a socket, orphaning all but
-            # one (the checkpoint in connect_datagram_socket lets them interleave).
-            async with self._sender_lock:
-                if self._sender is None:
-                    self._sender = await connect_datagram_socket(
-                        self.address[0], int(self.address[1])
-                    )
+        sender = self._sender
+        if sender is None:
+            sender = await self._open_sender()
+        await sender.send(message)
 
-        await self._sender.send(message)
+    async def _open_sender(self) -> DatagramSocket:
+        # Guard the lazy open: without the lock two coroutines emitting their first
+        # metric concurrently would each open a socket, orphaning all but one (the
+        # checkpoint in connect_datagram_socket lets them interleave).
+        async with self._sender_lock:
+            if self._sender is None:
+                self._sender = await connect_datagram_socket(self.address[0], int(self.address[1]))
+            return self._sender  # whichever coroutine opened it, this is the shared socket
 
     async def aclose(self) -> None:
         """Close the UDP socket, if one has been opened."""
