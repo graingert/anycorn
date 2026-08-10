@@ -1,145 +1,103 @@
-"""Tests for the ProtocolWrapper's HTTP/1.1 to HTTP/2 upgrade handling."""
+"""Tests for ProtocolWrapper's HTTP/1.1 to HTTP/2 cleartext (h2c) upgrade.
+
+The ALPN-negotiated and prior-knowledge HTTP/2 paths are driven by a real httpx2
+client in ``tests/e2e/test_httpx2.py``. The h2c *Upgrade* mechanism is not something
+mainstream clients emit, so it is exercised here against the real H11 and H2 protocols
+(only HTTPStream is mocked, so no application task is actually spawned).
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
-import h11
 import pytest
 
-import anycorn.protocol
+import anycorn.protocol.h2
+import anycorn.protocol.h11
 from anycorn.config import Config
-from anycorn.events import RawData
+from anycorn.events import Event, RawData
 from anycorn.protocol import ProtocolWrapper
-from anycorn.protocol.h11 import H2CProtocolRequiredError, H2ProtocolAssumedError
+from anycorn.protocol.h2 import H2Protocol
+from anycorn.protocol.h11 import H11Protocol
 from anycorn.typing import ConnectionState
-from anycorn.worker_context import WorkerContext
 
-if TYPE_CHECKING:
-    from anycorn.events import Event
+# A valid HTTP2-Settings header value (base64url of a SETTINGS payload), as an h2c client
+# would send, so the real H2 handler accepts the upgrade.
+H2C_SETTINGS = b"AAMAAABkAAQAAP__"
 
-
-class _FakeH2Protocol:
-    """Stands in for H2Protocol so the upgrade can be observed without a real h2 stack."""
-
-    instances: ClassVar[list[_FakeH2Protocol]] = []
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401, ARG002
-        self.initiated: list[tuple[tuple, dict]] = []
-        self.handled: list[Event] = []
-        _FakeH2Protocol.instances.append(self)
-
-    async def initiate(self, *args: Any, **kwargs: Any) -> None:  # noqa: ANN401
-        self.initiated.append((args, kwargs))
-
-    async def handle(self, event: Event) -> None:
-        self.handled.append(event)
+# The HTTP/2 connection preface a client sends immediately after the upgrade.
+H2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
 
-class _RaisesOnHandle:
-    """A protocol whose handle raises a given upgrade error, standing in for H11Protocol."""
+def _h2c_request(trailing: bytes = b"") -> bytes:
+    return (
+        b"GET / HTTP/1.1\r\n"
+        b"host: anycorn\r\n"
+        b"connection: upgrade, http2-settings\r\n"
+        b"upgrade: h2c\r\n"
+        b"http2-settings: " + H2C_SETTINGS + b"\r\n\r\n" + trailing
+    )
 
-    def __init__(self, error: Exception) -> None:
-        self._error = error
 
-    async def handle(self, event: Event) -> None:  # noqa: ARG002
-        raise self._error
+def _make_wrapper(monkeypatch: pytest.MonkeyPatch) -> tuple[ProtocolWrapper, list[Event]]:
+    # Mock HTTPStream in both protocol modules so the upgrade does not spawn a real app.
+    for module in (anycorn.protocol.h11, anycorn.protocol.h2):
+        stream_factory = Mock()
+        stream_factory.return_value = AsyncMock()
+        monkeypatch.setattr(module, "HTTPStream", stream_factory)
 
+    context = Mock()
+    context.event_class.return_value = AsyncMock()
+    context.mark_request = AsyncMock()
+    context.terminate = context.event_class()
+    context.terminated = context.event_class()
+    context.terminated.is_set.return_value = False
 
-def _wrapper(monkeypatch: pytest.MonkeyPatch, error: Exception) -> ProtocolWrapper:
-    monkeypatch.setattr(anycorn.protocol, "H2Protocol", _FakeH2Protocol)
-    _FakeH2Protocol.instances.clear()
+    task_group = Mock()
+    task_group.spawn = Mock()  # H2Protocol.initiate spawns its send task synchronously
+    task_group.spawn_app = AsyncMock()
+
+    sent: list[Event] = []
+
+    async def send(event: Event) -> None:
+        sent.append(event)
+
     wrapper = ProtocolWrapper(
         AsyncMock(),
         Config(),
-        WorkerContext(None),
-        AsyncMock(),
+        context,
+        task_group,
         ConnectionState({}),
-        ("127.0.0.1", 1234),
-        ("127.0.0.1", 8000),
-        AsyncMock(),
+        None,
+        None,
+        send,
         None,
     )
-    wrapper.protocol = _RaisesOnHandle(error)  # type: ignore[assignment]
-    return wrapper
+    return wrapper, sent
 
 
 @pytest.mark.anyio
-async def test_alpn_h2_builds_an_h2_protocol_and_initiate_delegates(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Negotiating h2 over ALPN builds H2Protocol up front, and initiate delegates to it."""
-    monkeypatch.setattr(anycorn.protocol, "H2Protocol", _FakeH2Protocol)
-    _FakeH2Protocol.instances.clear()
-    wrapper = ProtocolWrapper(
-        AsyncMock(),
-        Config(),
-        WorkerContext(None),
-        AsyncMock(),
-        ConnectionState({}),
-        None,
-        None,
-        AsyncMock(),
-        None,
-        alpn_protocol="h2",
-    )
-    assert isinstance(wrapper.protocol, _FakeH2Protocol)
+async def test_h2c_upgrade_switches_to_http2(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An h2c Upgrade request replaces the H11 handler with a real H2 handler."""
+    wrapper, sent = _make_wrapper(monkeypatch)
     await wrapper.initiate()
-    assert wrapper.protocol.initiated == [((), {})]
+    assert isinstance(wrapper.protocol, H11Protocol)
+
+    await wrapper.handle(RawData(data=_h2c_request()))
+
+    assert isinstance(wrapper.protocol, H2Protocol)
+    # The 101 Switching Protocols response and the HTTP/2 SETTINGS both went out.
+    assert any(isinstance(event, RawData) and b"101" in event.data for event in sent)
 
 
 @pytest.mark.anyio
-async def test_h2_preface_upgrades_and_replays_the_buffered_data(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    wrapper = _wrapper(monkeypatch, H2ProtocolAssumedError(data=b"leftover"))
-    await wrapper.handle(RawData(data=b"PRI * HTTP/2.0"))
+async def test_h2c_upgrade_replays_pipelined_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bytes pipelined after the upgrade request are handed to the new HTTP/2 handler."""
+    wrapper, _sent = _make_wrapper(monkeypatch)
+    await wrapper.initiate()
 
-    assert isinstance(wrapper.protocol, _FakeH2Protocol)
-    assert wrapper.protocol.initiated == [((), {})]  # initiate() with no arguments
-    assert wrapper.protocol.handled == [RawData(data=b"leftover")]  # the buffered bytes replayed
+    # The client pipelines the HTTP/2 preface right behind the upgrade request; it must
+    # reach the H2 handler rather than being dropped on the floor with the old H11 one.
+    await wrapper.handle(RawData(data=_h2c_request(trailing=H2_PREFACE)))
 
-
-@pytest.mark.anyio
-async def test_h2_preface_with_no_buffered_data_does_not_replay(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    wrapper = _wrapper(monkeypatch, H2ProtocolAssumedError(data=b""))
-    await wrapper.handle(RawData(data=b"PRI * HTTP/2.0"))
-
-    assert isinstance(wrapper.protocol, _FakeH2Protocol)
-    assert wrapper.protocol.handled == []  # nothing buffered, so nothing to replay
-
-
-@pytest.mark.anyio
-async def test_h2c_upgrade_initiates_with_headers_and_settings(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    request = h11.Request(
-        method="GET",
-        target="/",
-        headers=[("host", "example"), ("http2-settings", "AAMAAABk"), ("upgrade", "h2c")],
-    )
-    error = H2CProtocolRequiredError(data=b"rest", request=request)
-    wrapper = _wrapper(monkeypatch, error)
-
-    await wrapper.handle(RawData(data=b"GET / HTTP/1.1"))
-
-    assert isinstance(wrapper.protocol, _FakeH2Protocol)
-    (args, _kwargs) = wrapper.protocol.initiated[0]
-    assert args == (error.headers, error.settings)  # the upgrade carries headers + settings
-    assert wrapper.protocol.handled == [RawData(data=b"rest")]
-
-
-@pytest.mark.anyio
-async def test_h2c_upgrade_with_no_buffered_data_does_not_replay(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    request = h11.Request(method="GET", target="/", headers=[("host", "example")])
-    wrapper = _wrapper(monkeypatch, H2CProtocolRequiredError(data=b"", request=request))
-
-    await wrapper.handle(RawData(data=b"GET / HTTP/1.1"))
-
-    assert isinstance(wrapper.protocol, _FakeH2Protocol)
-    assert wrapper.protocol.handled == []
+    assert isinstance(wrapper.protocol, H2Protocol)
