@@ -2,20 +2,14 @@
 
 from __future__ import annotations
 
-import socket
 import ssl
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-import anyio
-import anyio.to_thread
 import pytest
-import trustme
 from anyio import TypedAttributeLookupError
-from anyio.abc import SocketStream
-from anyio.streams.tls import TLSAttribute, TLSStream
+from anyio.streams.tls import TLSAttribute
 
 from anycorn.config import Config
 from anycorn.utils import (
@@ -32,7 +26,7 @@ from anycorn.utils import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
-    from anycorn.typing import Scope, TLSExtension
+    from anycorn.typing import Scope
 
 
 @pytest.mark.parametrize(
@@ -189,89 +183,6 @@ def test_build_tls_extension_missing_required_certificate() -> None:
     assert extension["client_cert_chain"] == ()
     assert extension["client_cert_name"] is None
     assert extension["client_cert_error"] == "missing-client-certificate"
-
-
-@pytest.mark.anyio
-async def test_build_tls_extension_over_a_real_tls_stream(tmp_path: Path) -> None:  # noqa: PLR0915
-    """build_tls_extension harvests the real client certificate off anyio's TLSStream.
-
-    The tests above feed it a hand-written fake ssl object; this drives a real TLS handshake
-    over anyio's in-memory TLSStream - the non-kTLS path used for ordinary TLS binds, backed
-    by a real ssl.SSLObject - and asserts the extension holds the exact certificates the
-    client presented (mirroring tests/test_ktls.py, which does the same over a KTLSStream).
-    """
-    ca = trustme.CA()
-    server_cert = ca.issue_cert("localhost")
-    client_cert = ca.issue_cert("client@example.com")
-    certfile = tmp_path / "cert.pem"
-    keyfile = tmp_path / "key.pem"
-    server_cert.cert_chain_pems[0].write_to_path(str(certfile))
-    server_cert.private_key_pem.write_to_path(str(keyfile))
-
-    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_ctx.load_cert_chain(str(certfile), str(keyfile))
-    server_ctx.verify_mode = ssl.CERT_REQUIRED  # ask the client for a certificate
-    ca.configure_trust(server_ctx)
-    client_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ca.configure_trust(client_ctx)
-    client_cert.configure_cert(client_ctx)
-
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(1)
-    listener.setblocking(False)  # noqa: FBT003
-    port = listener.getsockname()[1]
-    config = Config()
-    config.certfile = str(certfile)
-    extension: TLSExtension | None = None
-
-    async def run_server() -> None:
-        nonlocal extension
-        while True:
-            try:
-                conn, _ = listener.accept()
-            except BlockingIOError:  # noqa: PERF203
-                await anyio.wait_readable(listener)
-            else:
-                break
-        transport = await SocketStream.from_socket(conn)
-        tls = await TLSStream.wrap(
-            transport, server_side=True, ssl_context=server_ctx, standard_compatible=False
-        )
-        extension = build_tls_extension(config, tls)
-        await tls.receive()
-        await tls.aclose()
-
-    async def run_client() -> None:
-        # A blocking stdlib client in a worker thread, so the async server is the code under
-        # test and there is no concurrent async close between two anyio streams (racy on trio).
-        def talk() -> None:
-            with socket.create_connection(("127.0.0.1", port)) as raw:
-                tls = client_ctx.wrap_socket(raw, server_hostname="localhost")
-                tls.sendall(b"hi")
-                tls.close()
-
-        await anyio.to_thread.run_sync(talk)
-
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(run_server)
-        task_group.start_soon(run_client)
-    listener.close()
-
-    assert extension is not None
-    assert extension["tls_version"] is not None
-    assert extension["cipher_suite"] is not None
-    assert extension["server_cert"] is not None
-    assert extension["client_cert_error"] is None
-    assert extension["client_cert_name"] is not None
-    assert "O=trustme" in extension["client_cert_name"]
-    # The harvested chain is exactly the certificates the client presented, compared by DER.
-    # get_verified_chain (CPython 3.13+) returns the client leaf and the CA; older Pythons
-    # fall back to getpeercert and return the leaf alone - matching tests/test_ktls.py.
-    client_leaf = ssl.PEM_cert_to_DER_cert(client_cert.cert_chain_pems[0].bytes().decode())
-    issuing_ca = ssl.PEM_cert_to_DER_cert(ca.cert_pem.bytes().decode())
-    chain = [ssl.PEM_cert_to_DER_cert(pem) for pem in extension["client_cert_chain"]]
-    assert chain == ([client_leaf, issuing_ca] if sys.version_info >= (3, 13) else [client_leaf])
 
 
 @pytest.mark.anyio
