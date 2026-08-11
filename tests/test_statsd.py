@@ -51,7 +51,9 @@ async def statsd_daemon() -> AsyncIterator[_StatsdDaemon]:
     """Run a UDP statsd daemon on loopback for the duration of a test."""
     async with await anyio.create_udp_socket(local_host="127.0.0.1") as sock:
         daemon = _StatsdDaemon(sock)
-        async with anyio.create_task_group() as task_group:
+        # Close the streams as well as the socket, or the unclosed memory streams raise
+        # an unraisable warning when garbage collected, which fails under -W error.
+        async with daemon._send, daemon._receive, anyio.create_task_group() as task_group:
             task_group.start_soon(daemon.serve)
             yield daemon
             task_group.cancel_scope.cancel()
