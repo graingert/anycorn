@@ -510,7 +510,8 @@ def repr_socket_addr(family: int, address: tuple) -> str:
         return f"{address[0]}:{address[1]}"
     if family == socket.AF_INET6:
         return f"[{address[0]}]:{address[1]}"
-    if family == socket.AF_UNIX:
+    if family == getattr(socket, "AF_UNIX", None):  # pragma: win32 no cover
+        # AF_UNIX does not exist on Windows; getattr keeps the comparison safe there.
         return f"unix:{address}"
     return f"{address}"
 

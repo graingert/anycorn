@@ -281,12 +281,17 @@ def test_is_asgi_is_false_for_non_callables(app: Any) -> None:  # noqa: ANN401
     assert is_asgi(app) is False
 
 
+# AF_UNIX does not exist on Windows, so guard the reference and skip those cases there.
+_AF_UNIX = getattr(socket, "AF_UNIX", None)
+_needs_af_unix = pytest.mark.skipif(_AF_UNIX is None, reason="AF_UNIX is unavailable")
+
+
 @pytest.mark.parametrize(
     ("family", "address", "expected"),
     [
         (socket.AF_INET, ("127.0.0.1", 80), ("127.0.0.1", 80)),
         (socket.AF_INET6, ("::1", 80, 0, 0), ("::1", 80)),
-        (socket.AF_UNIX, "anycorn.sock", None),
+        pytest.param(_AF_UNIX, "anycorn.sock", None, marks=_needs_af_unix),
     ],
 )
 def test_parse_socket_addr(family: int, address: Any, expected: Any) -> None:  # noqa: ANN401
@@ -298,7 +303,7 @@ def test_parse_socket_addr(family: int, address: Any, expected: Any) -> None:  #
     [
         (socket.AF_INET, ("127.0.0.1", 80), "127.0.0.1:80"),
         (socket.AF_INET6, ("::1", 80), "[::1]:80"),
-        (socket.AF_UNIX, "anycorn.sock", "unix:anycorn.sock"),
+        pytest.param(_AF_UNIX, "anycorn.sock", "unix:anycorn.sock", marks=_needs_af_unix),
         (-1, ("weird",), "('weird',)"),  # an unknown family falls back to repr
     ],
 )
