@@ -77,7 +77,11 @@ strict = true
 
 [tool.coverage.run]
 plugins = ["covdefaults"]
-source = ["src/anycorn", "tests"]
+# Resolve anycorn by import name, not by path: it is installed into site-packages (via a
+# .pth to src), so a path source of "src/anycorn" would not match the imported module and
+# would silently measure nothing. tests is still measured by path.
+source_pkgs = ["anycorn"]
+source = ["tests"]
 
 [tool.coverage.report]
 omit = [
