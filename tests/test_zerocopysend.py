@@ -56,7 +56,7 @@ async def _serve_and_get(app: Any) -> httpx2.Response:  # noqa: ANN401
 
 
 @pytest.mark.anyio
-async def test_pathsend_delivers_the_file(tmp_path: Path) -> None:
+async def test_pathsend_delivers_the_file(tmp_path: Path) -> None:  # pragma: win32 no cover
     """Path send transmits the whole named file as the response body via os.sendfile."""
     payload = b"pathsend zero copy\n" * 10_000
     file_path = tmp_path / "payload.bin"
@@ -78,7 +78,9 @@ async def test_pathsend_delivers_the_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_zerocopysend_delivers_a_file_descriptor(tmp_path: Path) -> None:
+async def test_zerocopysend_delivers_a_file_descriptor(  # pragma: win32 no cover
+    tmp_path: Path,
+) -> None:
     """The app hands over an open descriptor and offset/count; the window is sent."""
     payload = bytes(range(256)) * 500
     file_path = tmp_path / "payload.bin"

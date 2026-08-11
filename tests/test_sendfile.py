@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.skipif(not have_sendfile, reason="os.sendfile unavailable")
 
 
-async def _drain(sock: socket.socket, expected: int) -> bytes:
+async def _drain(sock: socket.socket, expected: int) -> bytes:  # pragma: win32 no cover
     received = bytearray()
     while len(received) < expected:
         chunk = await anyio.to_thread.run_sync(sock.recv, 65536)
@@ -33,7 +33,20 @@ async def _drain(sock: socket.socket, expected: int) -> bytes:
 
 
 @pytest.mark.anyio
-async def test_sendfile_transmits_the_whole_file(tmp_path: Path) -> None:
+async def test_drain_stops_when_the_peer_closes_early() -> None:  # pragma: win32 no cover
+    """_drain returns what arrived when the peer closes before the expected count."""
+    send_sock, recv_sock = tcp_socket_pair()
+    await anyio.to_thread.run_sync(send_sock.sendall, b"partial")
+    send_sock.close()  # half-close after a short write, so recv soon reads empty
+    try:
+        got = await _drain(recv_sock, 1000)  # asks for far more than will ever come
+    finally:
+        recv_sock.close()
+    assert got == b"partial"
+
+
+@pytest.mark.anyio
+async def test_sendfile_transmits_the_whole_file(tmp_path: Path) -> None:  # pragma: win32 no cover
     """A file larger than the socket buffer is sent in full, awaiting writability."""
     payload = b"zero-copy payload\n" * 100_000  # ~1.8 MiB, well over the socket buffer
     file_path = tmp_path / "payload.bin"
@@ -63,7 +76,7 @@ async def test_sendfile_transmits_the_whole_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_sendfile_honours_offset_and_count(tmp_path: Path) -> None:
+async def test_sendfile_honours_offset_and_count(tmp_path: Path) -> None:  # pragma: win32 no cover
     """Only the requested window of the file is sent."""
     payload = bytes(range(256)) * 8
     file_path = tmp_path / "payload.bin"
@@ -93,7 +106,9 @@ async def test_sendfile_honours_offset_and_count(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_sendfile_without_count_reads_to_eof(tmp_path: Path) -> None:
+async def test_sendfile_without_count_reads_to_eof(  # pragma: win32 no cover
+    tmp_path: Path,
+) -> None:
     """count=None sends from the offset to the end of the file."""
     payload = b"tail" * 1000
     file_path = tmp_path / "payload.bin"
@@ -123,7 +138,7 @@ async def test_sendfile_without_count_reads_to_eof(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_sendfile_waits_for_writability_on_eagain(
+async def test_sendfile_waits_for_writability_on_eagain(  # pragma: win32 no cover
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     """A would-block from os.sendfile is awaited on writability, then the send resumes.
@@ -173,7 +188,9 @@ async def test_sendfile_waits_for_writability_on_eagain(
 
 
 @pytest.mark.anyio
-async def test_sendfile_offset_none_uses_current_position(tmp_path: Path) -> None:
+async def test_sendfile_offset_none_uses_current_position(  # pragma: win32 no cover
+    tmp_path: Path,
+) -> None:
     """offset=None starts from the file's current position."""
     payload = b"0123456789"
     file_path = tmp_path / "payload.bin"

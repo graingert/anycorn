@@ -85,20 +85,15 @@ source = ["tests"]
 
 [tool.coverage.report]
 omit = [
-    # kernel TLS runs only on Linux + Python 3.12+ with a kTLS-capable OpenSSL, so the
-    # other matrix jobs (macOS, Windows, Linux 3.10/3.11) can never exercise it. Per-job
-    # 100% enforcement cannot express "cover only there", so the module and the tests that
-    # drive it are left ungated - they still run and assert on Linux 3.12+.
+    # kTLS is available only on Linux with an OpenSSL that exposes OP_ENABLE_KTLS
+    # (CPython 3.12+), so its socket-backed TLS stream, listener and the tests that drive
+    # them are exercised only on the Linux 3.12+ jobs. That is a Linux-AND-3.12 condition,
+    # which covdefaults' single-tag platform/version pragmas cannot express per line (the
+    # way sendfile's plain win32 gating can), so these are omitted rather than gated. They
+    # still run and assert where kTLS is real.
     "*/anycorn/ktls.py",
     "*/tests/test_ktls.py",
     "*/tests/e2e/test_ktls_real.py",
-    # os.sendfile is POSIX-only, so these drive it on Linux and macOS but are skipped
-    # whole on Windows, where per-job 100% cannot be met. They still run and assert on
-    # the platforms that have sendfile; the read-based fallback they do not cover is
-    # exercised cross-platform by tests/test_sendfile_fallback.py. The sendfile source
-    # module itself stays gated (its Windows-dead parts carry win32 pragmas).
-    "*/tests/test_sendfile.py",
-    "*/tests/test_zerocopysend.py",
 ]
 
 [tool.ruff]

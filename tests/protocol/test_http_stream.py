@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import call
+from unittest.mock import AsyncMock, call
 
 import pytest
 
