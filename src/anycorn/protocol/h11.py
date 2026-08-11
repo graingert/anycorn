@@ -277,7 +277,7 @@ class H11Protocol:
                     await self.stream.handle(Body(stream_id=STREAM_ID, data=event.data))
                 elif isinstance(event, h11.EndOfMessage):
                     await self.stream.handle(EndBody(stream_id=STREAM_ID))
-                elif isinstance(event, Data):
+                elif isinstance(event, Data):  # pragma: no branch - only Data/NEED_DATA reach here
                     # WebSocket pass through
                     await self.stream.handle(event)
 
@@ -374,7 +374,9 @@ class H11Protocol:
         ):
             try:
                 self.connection.start_next_cycle()
-            except h11.LocalProtocolError:
+            except h11.LocalProtocolError:  # pragma: no cover - unreachable: the guard above
+                # proved our_state and their_state are both DONE, the exact condition under
+                # which start_next_cycle succeeds; kept as defence in depth.
                 await self.send(Closed())
             else:
                 self.response = None
