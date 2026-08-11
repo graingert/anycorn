@@ -92,6 +92,13 @@ omit = [
     "*/anycorn/ktls.py",
     "*/tests/test_ktls.py",
     "*/tests/e2e/test_ktls_real.py",
+    # os.sendfile is POSIX-only, so these drive it on Linux and macOS but are skipped
+    # whole on Windows, where per-job 100% cannot be met. They still run and assert on
+    # the platforms that have sendfile; the read-based fallback they do not cover is
+    # exercised cross-platform by tests/test_sendfile_fallback.py. The sendfile source
+    # module itself stays gated (its Windows-dead parts carry win32 pragmas).
+    "*/tests/test_sendfile.py",
+    "*/tests/test_zerocopysend.py",
 ]
 
 [tool.ruff]

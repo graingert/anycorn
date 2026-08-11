@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
-from unittest.mock import Mock, call
+from unittest.mock import AsyncMock, Mock, call
 
 import anyio
 import h11
@@ -34,12 +34,6 @@ from tests.helpers import capture_logs
 
 if TYPE_CHECKING:
     from _pytest.monkeypatch import MonkeyPatch
-
-try:
-    from unittest.mock import AsyncMock
-except ImportError:
-    # Python < 3.8
-    from unittest.mock import AsyncMock
 
 
 BASIC_HEADERS = [("Host", "anycorn"), ("Connection", "close")]

@@ -277,8 +277,11 @@ class H11Protocol:
                     await self.stream.handle(Body(stream_id=STREAM_ID, data=event.data))
                 elif isinstance(event, h11.EndOfMessage):
                     await self.stream.handle(EndBody(stream_id=STREAM_ID))
-                elif isinstance(event, Data):  # pragma: no branch - only Data/NEED_DATA reach here
-                    # WebSocket pass through
+                # WebSocket pass through. Only a websocket connection reaches this line at
+                # all - every HTTP event is handled by a branch above - and its next_event
+                # yields only Data or NEED_DATA (NEED_DATA breaks at line 270), so this is
+                # always Data. The pass-through is covered; the fall-through is unreachable.
+                elif isinstance(event, Data):  # pragma: no branch
                     await self.stream.handle(event)
 
     async def _create_stream(self, request: h11.Request) -> None:
