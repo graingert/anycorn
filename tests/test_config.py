@@ -114,7 +114,7 @@ def test_create_sockets_ip(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows is not Unix.")
-def test_create_sockets_unix(monkeypatch: MonkeyPatch) -> None:
+def test_create_sockets_unix(monkeypatch: MonkeyPatch) -> None:  # pragma: win32 no cover
     mock_socket = Mock()
     monkeypatch.setattr(socket, "socket", mock_socket)
     monkeypatch.setattr(os, "chown", Mock())
@@ -130,7 +130,9 @@ def test_create_sockets_unix(monkeypatch: MonkeyPatch) -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows is not Unix.")
-def test_create_sockets_unix_restores_umask_on_bind_failure(monkeypatch: MonkeyPatch) -> None:
+def test_create_sockets_unix_restores_umask_on_bind_failure(  # pragma: win32 no cover
+    monkeypatch: MonkeyPatch,
+) -> None:
     """A failed bind must not leak the configured umask into the rest of the process."""
     mock_socket = Mock()
     mock_socket.return_value.bind.side_effect = OSError("bind failed")
@@ -173,7 +175,7 @@ def test_create_sockets_fd(monkeypatch: MonkeyPatch) -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows is not Unix.")
-def test_create_sockets_multiple(monkeypatch: MonkeyPatch) -> None:
+def test_create_sockets_multiple(monkeypatch: MonkeyPatch) -> None:  # pragma: win32 no cover
     mock_socket = Mock()
     monkeypatch.setattr(socket, "socket", mock_socket)
     monkeypatch.setattr(os, "chown", Mock())
@@ -184,7 +186,7 @@ def test_create_sockets_multiple(monkeypatch: MonkeyPatch) -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="SO_REUSEADDR is the Unix path.")
-def test_set_reuse_socket_option_posix_sets_reuseaddr() -> None:
+def test_set_reuse_socket_option_posix_sets_reuseaddr() -> None:  # pragma: win32 no cover
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         _set_reuse_socket_option(sock)
@@ -320,7 +322,12 @@ def test_create_ssl_context_applies_verification_settings(tls_certs: TLSCerts) -
     assert context.verify_flags & ssl.VERIFY_X509_STRICT
 
 
-def test_create_sockets_reuseport_for_multiple_workers(monkeypatch: MonkeyPatch) -> None:
+@pytest.mark.skipif(
+    not hasattr(socket, "SO_REUSEPORT"), reason="SO_REUSEPORT is not available on this platform"
+)
+def test_create_sockets_reuseport_for_multiple_workers(  # pragma: win32 no cover
+    monkeypatch: MonkeyPatch,
+) -> None:
     """With more than one worker the listening socket is opened with SO_REUSEPORT."""
     mock_socket = Mock()
     monkeypatch.setattr(socket, "socket", mock_socket)
@@ -355,7 +362,9 @@ def test_set_quic_addresses_warns_on_an_unusable_socket_name() -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX is a Unix concept.")
-def test_create_sockets_unix_unlinks_a_stale_socket_file(tmp_path: Path) -> None:
+def test_create_sockets_unix_unlinks_a_stale_socket_file(  # pragma: win32 no cover
+    tmp_path: Path,
+) -> None:
     """A leftover socket file at the bind path is removed before rebinding."""
     sock_path = tmp_path / "stale.sock"
     # Leave a real socket file behind, exactly as a crashed previous server would.
@@ -377,7 +386,9 @@ def test_create_sockets_unix_unlinks_a_stale_socket_file(tmp_path: Path) -> None
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="os.chown is a Unix concept.")
-def test_create_sockets_unix_chowns_the_socket(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+def test_create_sockets_unix_chowns_the_socket(  # pragma: win32 no cover
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
     """When user and group are set the bound socket file is chowned to them."""
     sock_path = tmp_path / "owned.sock"
     config = Config()

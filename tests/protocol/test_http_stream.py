@@ -83,7 +83,7 @@ async def test_handle_request_http_1(stream: HTTPStream, http_version: str) -> N
     scope = stream.task_group.spawn_app.call_args[0][2]  # type: ignore[attr-defined]
     # Zero copy send is offered on plaintext HTTP/1.1, but only where os.sendfile exists.
     expected_extensions: dict = {"http.response.pathsend": {}}
-    if have_sendfile:
+    if have_sendfile:  # pragma: no branch - constant per platform
         expected_extensions["http.response.zerocopysend"] = {}
     assert scope == {
         "type": "http",
@@ -700,6 +700,55 @@ async def test_zerocopysend_defaults_offset_and_count(stream: HTTPStream, tmp_pa
         await stream.app_send(cast("Any", {"type": "http.response.zerocopysend", "file": file}))
     zerocopy = next(event for event in sent if isinstance(event, ZeroCopySend))
     assert (zerocopy.offset, zerocopy.count) == (0, len(payload))
+
+
+@pytest.mark.anyio
+async def test_zerocopysend_extension_is_advertised_when_enabled() -> None:
+    """With zero-copy send enabled, HTTP/1.1 advertises the extension on every platform."""
+    stream = HTTPStream(
+        AsyncMock(),
+        Config(),
+        WorkerContext(None),
+        AsyncMock(),
+        None,
+        None,
+        AsyncMock(),
+        1,
+        None,
+        zero_copy_send=True,  # forced on, independent of whether os.sendfile exists here
+    )
+    stream.app_put = AsyncMock()
+    capture_logs(stream.config)
+    await stream.handle(_request("1.1"))
+    scope = stream.task_group.spawn_app.call_args[0][2]  # type: ignore[attr-defined]
+    assert "http.response.zerocopysend" in scope["extensions"]
+
+
+@pytest.mark.anyio
+async def test_zerocopysend_with_explicit_offset_and_count(
+    stream: HTTPStream, tmp_path: Path
+) -> None:
+    """An explicit offset and count are passed straight through without probing the file."""
+    payload = b"window-of-bytes" * 50
+    file_path = tmp_path / "payload.bin"
+    file_path.write_bytes(payload)
+    sent = _collect(stream)
+    await stream.handle(_request("1.1"))
+    await stream.app_send(
+        cast(
+            "HTTPResponseStartEvent",
+            {"type": "http.response.start", "status": 200, "headers": [(b"content-length", b"12")]},
+        )
+    )
+    with file_path.open("rb") as file:
+        await stream.app_send(
+            cast(
+                "Any",
+                {"type": "http.response.zerocopysend", "file": file, "offset": 6, "count": 12},
+            )
+        )
+    zerocopy = next(event for event in sent if isinstance(event, ZeroCopySend))
+    assert (zerocopy.offset, zerocopy.count) == (6, 12)
 
 
 @pytest.mark.anyio

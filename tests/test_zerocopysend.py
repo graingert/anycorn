@@ -28,7 +28,7 @@ pytestmark = pytest.mark.skipif(not have_sendfile, reason="os.sendfile unavailab
 HOST = "127.0.0.1"
 
 
-async def _serve_and_get(app: Any) -> httpx2.Response:  # noqa: ANN401
+async def _serve_and_get(app: Any) -> httpx2.Response:  # noqa: ANN401  # pragma: win32 no cover
     """Serve *app* with worker_serve on an OS-assigned port and GET once over TCP."""
     config = Config()
     # Port 0 lets the OS pick a free port; worker_serve reports the actual bind URL back

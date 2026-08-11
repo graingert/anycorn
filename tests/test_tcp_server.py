@@ -30,6 +30,7 @@ from .helpers import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from pathlib import Path
 
     from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
@@ -175,6 +176,35 @@ async def test_protocol_send_sendfile_closes_when_the_transmit_fails() -> None:
 
 
 @pytest.mark.anyio
+async def test_protocol_send_sendfile_reads_and_sends_through_the_stream(tmp_path: Path) -> None:
+    """Without a sendfile socket (TLS, or Windows), the file window is read and sent."""
+    payload = b"read-path body\n" * 100
+    file_path = tmp_path / "payload.bin"
+    file_path.write_bytes(payload)
+    client, server_stream = _stream_pair()
+    server = _server(server_stream)
+    server.protocol = AsyncMock()
+    sent = bytearray()
+
+    async def collect() -> None:
+        while True:
+            chunk = await client.receive_some()
+            if not chunk:
+                return
+            sent.extend(chunk)
+
+    with file_path.open("rb") as file:
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(collect)
+            await anyio.wait_all_tasks_blocked()
+            await server.protocol_send(SendFile(file=file.fileno(), offset=0, count=len(payload)))
+            await server_stream.aclose()  # EOF so collect finishes
+    server.protocol.handle.assert_not_awaited()  # a successful send, no Closed
+    assert bytes(sent) == payload
+    await client.aclose()
+
+
+@pytest.mark.anyio
 async def test_protocol_send_ignores_an_unknown_event() -> None:
     """protocol_send only reacts to RawData/SendFile/Closed/Updated; anything else is a no-op."""
     client, server_stream = _stream_pair()
@@ -186,29 +216,17 @@ async def test_protocol_send_ignores_an_unknown_event() -> None:
     await server_stream.aclose()
 
 
-class _EmptyReadThenEofStream(MemorySocketStream):
-    """A stream that reads back an empty byte string once, as a half-closed socket does."""
-
-    def __init__(
-        self,
-        receive_stream: MemoryObjectReceiveStream[bytes],
-        send_stream: MemoryObjectSendStream[bytes],
-        attributes: Mapping[Any, Callable[[], Any]],
-    ) -> None:
-        super().__init__(receive_stream, send_stream, attributes)
-        self._gave_empty = False
+class _EmptyReadStream(MemorySocketStream):
+    """A stream that reads back an empty byte string, as a half-closed socket does."""
 
     async def receive(self, max_bytes: int = 65536) -> bytes:  # noqa: ARG002
-        if not self._gave_empty:
-            self._gave_empty = True
-            return b""  # a real socket signals a peer half-close with an empty read
-        raise anyio.EndOfStream
+        return b""  # a real socket signals a peer half-close with an empty read
 
 
 @pytest.mark.anyio
 async def test_an_empty_read_ends_the_read_loop() -> None:
     """An empty read (peer half-close) stops the receive loop and closes the connection."""
-    client, server_stream = _stream_pair(_EmptyReadThenEofStream)
+    client, server_stream = _stream_pair(_EmptyReadStream)
     server = _server(server_stream)
     with anyio.fail_after(5):
         async with anyio.create_task_group() as task_group:
@@ -226,10 +244,7 @@ class _PeerNameRaises:
 
     family = socket.AF_INET
 
-    def getsockname(self) -> tuple[str, int]:
-        return ("127.0.0.1", 80)
-
-    def getpeername(self) -> tuple[str, int]:
+    def getpeername(self) -> tuple[str, int]:  # read first in run(), before getsockname
         raise OSError(errno.ENOTCONN, "socket is not connected")
 
 

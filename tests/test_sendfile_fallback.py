@@ -54,8 +54,10 @@ def test_pread_reads_at_offset_without_moving_the_position(tmp_path: Path) -> No
         fd = file.fileno()
         os.lseek(fd, 2, os.SEEK_SET)
         assert _pread(fd, 3, 5) == b"567"
-        # The caller's position is unchanged by the read.
-        assert os.lseek(fd, 0, os.SEEK_CUR) == 2  # noqa: PLR2004
+        if hasattr(os, "pread"):  # pragma: no branch - constant per platform
+            # os.pread reads without moving the position; the Windows dup/seek fallback
+            # shares the descriptor's offset, so it does move there and is not asserted.
+            assert os.lseek(fd, 0, os.SEEK_CUR) == 2  # noqa: PLR2004
 
 
 def test_pread_falls_back_to_dup_when_pread_is_absent(
@@ -64,9 +66,9 @@ def test_pread_falls_back_to_dup_when_pread_is_absent(
     """Where os.pread is unavailable (Windows), a duplicated descriptor is seeked and read.
 
     os.pread is hidden here so the fallback is exercised on any platform, and it returns
-    the bytes at the offset. (Leaving the caller's position untouched relies on a
-    duplicated descriptor having an independent offset, which holds on Windows - the only
-    platform that actually takes this path - but not on POSIX, where dup shares it.)
+    the bytes at the offset. (It reads through a duplicated descriptor, which shares the
+    original's offset, so the caller's position does move - only the returned bytes are
+    asserted.)
     """
     monkeypatch.delattr(os, "pread", raising=False)
     payload = b"abcdefghij"

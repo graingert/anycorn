@@ -63,7 +63,7 @@ def _set_reuse_socket_option(sock: socket.socket) -> None:
         # the module importable (and statically checkable) on other platforms.
         exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE")  # noqa: B009
         sock.setsockopt(socket.SOL_SOCKET, exclusive, 1)
-    else:
+    else:  # pragma: win32 no cover - SO_REUSEADDR is the non-Windows path
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
 
