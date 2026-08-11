@@ -148,9 +148,8 @@ class FailingLifespanFramework:
     """A framework whose startup genuinely fails, the ASGI way: by saying so."""
 
     async def __call__(self, _scope: Scope, receive: Callable, send: Callable) -> None:
-        message = await receive()
-        if message["type"] == "lifespan.startup":
-            await send({"type": "lifespan.startup.failed", "message": "no database"})
+        assert (await receive())["type"] == "lifespan.startup"  # always driven startup-first
+        await send({"type": "lifespan.startup.failed", "message": "no database"})
 
 
 @pytest.mark.anyio
@@ -296,3 +295,36 @@ async def test_strict_paths_still_lets_a_root_mount_match_everything(
     await app(scope, AsyncMock(), AsyncMock())  # type: ignore[arg-type]
 
     assert served == [("root", "/")]
+
+
+class _SelfCompletingFramework:
+    """A mount that drives the whole lifespan itself, and emits an unrecognised message too."""
+
+    async def __call__(self, scope: Scope, receive: Callable, send: Callable) -> None:
+        assert scope["type"] == "lifespan"
+        assert (await receive())["type"] == "lifespan.startup"
+        await send({"type": "lifespan.ping"})  # not a completion or failure; ignored
+        await send({"type": "lifespan.startup.complete"})
+        assert (await receive())["type"] == "lifespan.shutdown"
+        await send({"type": "lifespan.shutdown.complete"})
+
+
+@pytest.mark.anyio
+async def test_dispatcher_lifespan_with_a_mount_that_completes_itself() -> None:
+    """A mount that acks startup and shutdown itself is not completed for it a second time."""
+    app = DispatcherMiddleware({"/api": _SelfCompletingFramework()})
+    sent_events: list[dict] = []
+
+    async def send(message: dict) -> None:
+        sent_events.append(message)
+
+    messages = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
+
+    async def receive() -> dict:
+        return next(messages)
+
+    await app({"type": "lifespan", "asgi": {"version": "3.0"}, "state": {}}, receive, send)
+    assert [event["type"] for event in sent_events] == [
+        "lifespan.startup.complete",
+        "lifespan.shutdown.complete",
+    ]

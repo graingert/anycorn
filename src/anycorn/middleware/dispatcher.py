@@ -17,12 +17,15 @@ if TYPE_CHECKING:
 MAX_QUEUE_SIZE = 10
 
 
-class _DispatcherMiddleware:
+class DispatcherMiddleware:
+    """ASGI middleware that dispatches requests to different apps based on path prefixes."""
+
     def __init__(self, mounts: dict[str, ASGIFramework], *, strict_paths: bool = False) -> None:
         self.mounts = mounts
         self.strict_paths = strict_paths
 
     async def __call__(self, scope: Scope, receive: Callable, send: Callable) -> None:
+        """Route the request to the app mounted at its path, or 404 if none matches."""
         if scope["type"] == "lifespan":
             await self._handle_lifespan(scope, receive, send)
         else:
@@ -77,13 +80,6 @@ class _DispatcherMiddleware:
         if not self.strict_paths:
             return path.startswith(mount)
         return path == mount or path.startswith(mount.rstrip("/") + "/")
-
-    async def _handle_lifespan(self, scope: Scope, receive: Callable, send: Callable) -> None:
-        pass
-
-
-class DispatcherMiddleware(_DispatcherMiddleware):
-    """ASGI middleware that dispatches requests to different apps based on path prefixes."""
 
     async def _handle_lifespan(self, scope: Scope, receive: Callable, send: Callable) -> None:
         self.app_queues: dict[
