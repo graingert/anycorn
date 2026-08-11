@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from anycorn.middleware import ProxyFixMiddleware
+from anycorn.middleware.proxy_fix import _get_trusted_value
 from anycorn.typing import ConnectionState, HTTPScope
 
 if TYPE_CHECKING:
@@ -110,3 +111,46 @@ async def test_proxy_fix_keeps_unpicklable_state() -> None:
     # And the caller's scope was left alone
     assert scope["client"] == ("localhost", 80)
     assert seen[0]["client"] == ("127.0.0.1", 0)
+
+
+def test_get_trusted_value_with_no_trusted_hops_is_none() -> None:
+    """With zero trusted hops nothing in the forwarding headers may be believed."""
+    headers = [(b"x-forwarded-for", b"1.2.3.4")]
+    assert _get_trusted_value(b"x-forwarded-for", headers, 0) is None
+
+
+@pytest.mark.anyio
+async def test_proxy_fix_passes_non_http_scopes_through_untouched() -> None:
+    """Only http and websocket scopes are rewritten; a lifespan scope is forwarded as-is."""
+    mock = AsyncMock()
+    app = ProxyFixMiddleware(mock)
+    scope: Any = {"type": "lifespan", "asgi": {"version": "3.0"}}
+    await app(scope, None, None)  # type: ignore[invalid-argument-type]
+    assert mock.call_args[0][0] is scope  # the very same object, unmodified
+
+
+@pytest.mark.anyio
+async def test_proxy_fix_modern_ignores_unknown_parts_and_a_missing_for() -> None:
+    """A Forwarded value with only proto (and an unrecognised token) sets scheme but no client."""
+    mock = AsyncMock()
+    app = ProxyFixMiddleware(mock, mode="modern")
+    scope: HTTPScope = {
+        "type": "http",
+        "asgi": {},
+        "http_version": "2",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/",
+        "raw_path": b"/",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"forwarded", b"proto=https;by=proxy")],
+        "client": ("127.0.0.3", 80),
+        "server": None,
+        "extensions": {},
+        "state": ConnectionState({}),
+    }
+    await app(scope, None, None)  # type: ignore[invalid-argument-type]
+    forwarded_scope = mock.call_args[0][0]
+    assert forwarded_scope["scheme"] == "https"  # proto was applied
+    assert forwarded_scope["client"] == ("127.0.0.3", 80)  # no for=, so client is untouched
