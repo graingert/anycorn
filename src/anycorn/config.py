@@ -25,9 +25,9 @@ from time import time
 from typing import TYPE_CHECKING, Any, AnyStr, ClassVar
 from wsgiref.handlers import format_date_time
 
-if sys.version_info >= (3, 11):
+if sys.version_info >= (3, 11):  # pragma: >=3.11 cover
     import tomllib
-else:
+else:  # pragma: <3.11 cover
     import tomli as tomllib
 
 import contextlib
@@ -231,7 +231,12 @@ class Config:
 
     def create_ssl_context(self) -> SSLContext | None:
         """Create and return an SSL context, or None if SSL is not enabled."""
-        if not self.ssl_enabled:
+        # ssl_enabled is exactly "certfile and keyfile are both set"; reading them into
+        # locals gates on the same condition while narrowing both to str for
+        # load_cert_chain, so there is no second, unreachable None-check to cover.
+        certfile = self.certfile
+        keyfile = self.keyfile
+        if certfile is None or keyfile is None:
             return None
 
         context = create_default_context(Purpose.CLIENT_AUTH)
@@ -244,12 +249,7 @@ class Config:
         context.options |= OP_NO_COMPRESSION
         context.set_alpn_protocols(self.alpn_protocols)
 
-        if self.certfile is not None and self.keyfile is not None:
-            context.load_cert_chain(
-                certfile=self.certfile,
-                keyfile=self.keyfile,
-                password=self.keyfile_password,
-            )
+        context.load_cert_chain(certfile=certfile, keyfile=keyfile, password=self.keyfile_password)
 
         if self.ca_certs is not None:
             context.load_verify_locations(self.ca_certs)
@@ -297,7 +297,7 @@ class Config:
         sockets: list[socket.socket] = []
         for bind in binds:
             binding: Any = None
-            if bind.startswith("unix:"):
+            if bind.startswith("unix:"):  # pragma: win32 no cover - AF_UNIX is not on Windows
                 sock = socket.socket(socket.AF_UNIX, type_)
                 binding = bind[5:]
                 with contextlib.suppress(FileNotFoundError):
@@ -327,7 +327,7 @@ class Config:
 
             _set_reuse_socket_option(sock)
 
-            if bind.startswith("unix:"):
+            if bind.startswith("unix:"):  # pragma: win32 no cover - AF_UNIX is not on Windows
                 assert binding is not None
                 # os.umask changes process-global state, so restore it in a finally:
                 # a bind() or chown() that raises would otherwise leave the worker's
