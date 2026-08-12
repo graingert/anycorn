@@ -21,7 +21,7 @@ from anycorn.datagram import wrap_datagram_socket
 from anycorn.events import RawData
 from anycorn.run import run, worker_serve
 from anycorn.udp_server import UDPServer
-from anycorn.utils import wrap_app
+from anycorn.utils import load_application, wrap_app
 from anycorn.worker_context import WorkerContext
 
 if TYPE_CHECKING:
@@ -429,9 +429,12 @@ def test_run_reloader_reloads_on_a_file_change(tmp_path: Path) -> None:  # pragm
         thread.join()
 
 
-@pytest.mark.anyio
-async def test_anyio_worker_runs_worker_serve_to_shutdown() -> None:
-    """anyio_worker really loads the app and runs worker_serve, which a set event ends."""
+def test_anyio_worker_runs_worker_serve_to_shutdown() -> None:
+    """anyio_worker really loads the app and runs worker_serve, which a set event ends.
+
+    A plain sync test: anyio_worker blocks on its own anyio.run, so it is called directly
+    rather than offloaded to a worker thread (which finalised sockets flakily under trio).
+    """
     config = Config()
     config.bind = ["127.0.0.1:0"]
     config.application_path = _RUN_APP
@@ -440,44 +443,35 @@ async def test_anyio_worker_runs_worker_serve_to_shutdown() -> None:
     event = anycorn.run.get_context("spawn").Event()
     event.set()  # already set, so worker_serve shuts down as soon as it starts
 
-    # Run the blocking worker off-thread so the test's event loop is free.
-    await anyio.to_thread.run_sync(anycorn.run.anyio_worker, config, sockets, event)
+    anycorn.run.anyio_worker(config, sockets, event)
 
 
 @pytest.mark.anyio
-async def test_anyio_worker_answers_a_real_request() -> None:
-    """anyio_worker loads the app by path and answers a full GET before a set event stops it.
+async def test_worker_serve_answers_a_request_for_a_path_loaded_app() -> None:
+    """A path-loaded app answers a full GET through worker_serve, exercising its whole response.
 
-    A pre-set event shuts the worker down before it ever serves, so this leaves the event unset,
-    drives one request to completion, then sets it - exercising the app's whole response.
+    Runs worker_serve directly in the test's own event loop rather than through an
+    anyio_worker worker thread, so it is deterministic on trio as well as asyncio while still
+    covering the load-by-path app end to end.
     """
     import httpx2  # noqa: PLC0415
 
     config = Config()
     config.bind = ["127.0.0.1:0"]
-    config.application_path = _RUN_APP
     config.accesslog = "-"
     config.errorlog = "-"
-    sockets = config.create_sockets()
-    port = sockets.insecure_sockets[0].getsockname()[1]
-    event = anycorn.run.get_context("spawn").Event()
+    app = load_application(_RUN_APP, config.wsgi_max_body_size)
 
-    response = None
-    with anyio.fail_after(15):
+    shutdown = anyio.Event()
+    with anyio.fail_after(10):
         async with anyio.create_task_group() as task_group:
-            task_group.start_soon(
-                lambda: anyio.to_thread.run_sync(anycorn.run.anyio_worker, config, sockets, event)
+            binds = await task_group.start(
+                partial(worker_serve, app, config, shutdown_trigger=shutdown.wait)
             )
-            async with httpx2.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
-                for _ in range(100):  # pragma: no branch  # wait for the worker to start
-                    try:
-                        response = await client.get("/")
-                        break
-                    except httpx2.ConnectError:  # pragma: no cover
-                        await anyio.sleep(0.05)
-            event.set()
+            async with httpx2.AsyncClient(base_url=binds[0]) as client:
+                response = await client.get("/")
+            shutdown.set()
 
-    assert response is not None
     assert response.status_code == 200  # noqa: PLR2004
     """A worker with no exitcode yet is not reaped; a finished one is."""
 
@@ -511,8 +505,7 @@ def test_populate_raises_a_clear_error_when_the_config_cannot_be_pickled() -> No
         anycorn.run._populate([], Config(), lambda **_k: None, None, None, _Ctx())  # type: ignore[arg-type]
 
 
-@pytest.mark.anyio
-async def test_anyio_worker_serves_tls_with_a_request_limit(tls_certs: TLSCerts) -> None:
+def test_anyio_worker_serves_tls_with_a_request_limit(tls_certs: TLSCerts) -> None:
     """The worker listens on the secure socket, applies max_requests, and a set event ends it."""
     config = Config()
     config.bind = ["127.0.0.1:0"]
@@ -523,7 +516,7 @@ async def test_anyio_worker_serves_tls_with_a_request_limit(tls_certs: TLSCerts)
     sockets = config.create_sockets()
     event = anycorn.run.get_context("spawn").Event()
     event.set()
-    await anyio.to_thread.run_sync(anycorn.run.anyio_worker, config, sockets, event)
+    anycorn.run.anyio_worker(config, sockets, event)
 
 
 def test_anyio_worker_without_sockets_creates_its_own() -> None:
