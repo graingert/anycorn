@@ -295,7 +295,6 @@ def test_run_terminates_workers_when_it_raises(
     assert len(terminated) == 1
 
 
-
 import os  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
@@ -547,6 +546,41 @@ async def test_worker_serve_uses_ktls_when_available(
     and served for real.
     """
     monkeypatch.setattr(anycorn.run, "can_enable_ktls", True)
+    config = Config()
+    config.bind = ["127.0.0.1:0"]
+    config.certfile = str(tls_certs.certfile)
+    config.keyfile = str(tls_certs.keyfile)
+    config.use_ktls = True
+    sockets = config.create_sockets()
+    for sock in sockets.secure_sockets:
+        sock.listen(config.backlog)
+
+    shutdown = anyio.Event()
+    async with anyio.create_task_group() as tg:
+        binds = await tg.start(
+            partial(
+                worker_serve,
+                wrap_app(app, config.wsgi_max_body_size, None),
+                config,
+                sockets=sockets,
+                shutdown_trigger=shutdown.wait,
+            )
+        )
+        assert binds
+        assert binds[0].startswith("https://")
+        shutdown.set()
+
+
+@pytest.mark.anyio
+async def test_worker_serve_warns_when_ktls_requested_but_unavailable(
+    tls_certs: TLSCerts, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """use_ktls set on a host without kTLS logs a warning and serves ordinary userspace TLS.
+
+    Forcing the flag off runs this path even where kTLS is real, so the warning branch is
+    covered on every job rather than only the ones that happen to lack kTLS.
+    """
+    monkeypatch.setattr(anycorn.run, "can_enable_ktls", False)
     config = Config()
     config.bind = ["127.0.0.1:0"]
     config.certfile = str(tls_certs.certfile)

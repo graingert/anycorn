@@ -276,9 +276,7 @@ async def test_a_framing_error_after_response_started_only_closes(protocol: H11P
     that h11 raises on the bad chunk is answered with a bare Closed, not a 4xx.
     """
     await protocol.handle(
-        RawData(
-            data=b"POST / HTTP/1.1\r\nHost: anycorn\r\nTransfer-Encoding: chunked\r\n\r\n"
-        )
+        RawData(data=b"POST / HTTP/1.1\r\nHost: anycorn\r\nTransfer-Encoding: chunked\r\n\r\n")
     )
     # The app starts responding, advancing our_state past SEND_RESPONSE.
     await protocol.stream_send(

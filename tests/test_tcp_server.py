@@ -251,9 +251,7 @@ class _PeerNameRaises:
 @pytest.mark.anyio
 async def test_run_swallows_an_oserror_while_setting_up() -> None:
     """An OSError reading the peer address must be caught by run, not escape it."""
-    client, server_stream = _stream_pair(
-        attributes={SocketAttribute.raw_socket: _PeerNameRaises}
-    )
+    client, server_stream = _stream_pair(attributes={SocketAttribute.raw_socket: _PeerNameRaises})
     server = _server(server_stream)
     with anyio.fail_after(5):
         await server.run()  # the OSError is swallowed and teardown still runs

@@ -62,8 +62,9 @@ def enable_ktls(context: ssl.SSLContext) -> None:  # pragma: linux cover
     A no-op where kTLS is unavailable, so it is always safe to call - the resulting
     connection is then ordinary userspace TLS.
     """
-    if _OP_ENABLE_KTLS is not None:
-        # OP_ENABLE_KTLS is only present on the Linux 3.12+ OpenSSL builds that ship kTLS.
+    # Whether this branch is taken is fixed by the OpenSSL build, so only one arm is ever
+    # reachable on a given job (kTLS builds take the body, others fall through).
+    if _OP_ENABLE_KTLS is not None:  # pragma: no branch
         context.options |= _OP_ENABLE_KTLS  # pragma: >=3.12 cover
 
 
@@ -76,7 +77,8 @@ def _ktls_send_active(sock: socket.socket) -> bool:  # pragma: linux cover
     the send path not configured (EBUSY), a wrong platform - is treated as "not active", so
     a plaintext ``sendfile`` is never done over a connection still encrypting in userspace.
     """
-    if not can_enable_ktls:
+    # can_enable_ktls is constant for the process, so only one arm runs on a given job.
+    if not can_enable_ktls:  # pragma: no branch
         return False
     try:
         sock.getsockopt(_SOL_TLS, _TLS_TX, _TLS_CRYPTO_INFO_SIZE)
