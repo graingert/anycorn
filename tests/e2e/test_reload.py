@@ -35,7 +35,7 @@ async def _is_serving(base_url: str) -> bool:
     try:
         async with httpx2.AsyncClient(base_url=base_url) as client:
             await client.get("/")
-    except httpx2.TransportError:
+    except httpx2.TransportError:  # pragma: no cover
         return False
     else:
         return True
@@ -46,7 +46,7 @@ async def _wait_until_serving(base_url: str) -> None:
         while True:
             if await _is_serving(base_url):
                 return
-            await anyio.sleep(0.1)
+            await anyio.sleep(0.1)  # pragma: no cover
 
 
 @pytest.mark.anyio

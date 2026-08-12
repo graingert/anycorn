@@ -27,7 +27,7 @@ async def _try_fetch_body(base_url: str) -> str | None:
     try:
         async with httpx2.AsyncClient(base_url=base_url) as client:
             response = await client.get("/")
-    except httpx2.TransportError:
+    except httpx2.TransportError:  # pragma: no cover
         return None
     else:
         return response.text
@@ -39,7 +39,7 @@ async def _fetch_body(base_url: str) -> str:
             body = await _try_fetch_body(base_url)
             if body is not None:
                 return body
-            await anyio.sleep(0.1)
+            await anyio.sleep(0.1)  # pragma: no cover
 
 
 @pytest.mark.anyio

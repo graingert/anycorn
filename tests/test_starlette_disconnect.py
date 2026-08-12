@@ -56,7 +56,9 @@ async def test_starlette_app_detects_a_client_disconnect() -> None:
         # As a long-running handler does: check periodically whether the client is
         # still there. Without the fix this stays False forever and loops out.
         for _ in range(_MAX_POLLS):
-            if await request.is_disconnected():
+            # Whether the disconnect is visible on the very first poll or only a later one
+            # is a timing detail that differs by platform.
+            if await request.is_disconnected():  # pragma: no branch
                 detected["disconnected"] = True
                 break
             await anyio.sleep(0.001)

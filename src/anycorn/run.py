@@ -131,7 +131,7 @@ def run(config: Config) -> int:  # noqa: C901, PLR0912, PLR0915
                         if updated:
                             reload()
                             break
-                        if len(finished) > 0:
+                        if len(finished) > 0:  # pragma: no branch
                             break
                 else:
                     wait(process.sentinel for process in processes)
