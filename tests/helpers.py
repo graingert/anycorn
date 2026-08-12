@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 SANITY_BODY = b"Hello Anycorn"
 
 
-def tcp_socket_pair() -> tuple[socket.socket, socket.socket]:
+def tcp_socket_pair() -> tuple[socket.socket, socket.socket]:  # pragma: win32 no cover
     """Return two connected loopback TCP sockets, like ``socket.socketpair()`` but AF_INET.
 
     The sendfile tests need a real socket to ``os.sendfile`` over. ``socket.socketpair()``

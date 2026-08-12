@@ -81,7 +81,7 @@ class TCPServer:
             if have_sendfile and socket.family in _SENDFILE_FAMILIES:
                 if tls_extension is None:  # pragma: win32 no cover - no os.sendfile on Windows
                     self._sendfile_socket = socket
-                else:
+                else:  # pragma: win32 no cover - no os.sendfile on Windows
                     self._sendfile_socket = self._ktls_sendfile_socket()
 
             async with TaskGroup() as task_group:

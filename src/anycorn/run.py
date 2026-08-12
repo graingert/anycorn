@@ -54,7 +54,9 @@ if sys.version_info < (3, 11):  # pragma: <3.11 cover
 def run(config: Config) -> int:  # noqa: C901, PLR0912, PLR0915
     """Start the server, blocking until it exits, and return an exit code."""
     if config.pid_path is not None:
-        write_pid_file(config.pid_path)
+        # Covered by the --workers 0 pid test, which delivers a real signal and so is
+        # POSIX-only; the pid file itself works the same on Windows.
+        write_pid_file(config.pid_path)  # pragma: win32 no cover
 
     worker_func: WorkerFunc
     worker_func = anyio_worker
@@ -86,7 +88,9 @@ def run(config: Config) -> int:  # noqa: C901, PLR0912, PLR0915
             active = True
             shutdown_event = ctx.Event()
 
-            def shutdown(*_args: Any) -> None:  # noqa: ANN401
+            def shutdown(*_args: Any) -> None:  # noqa: ANN401  # pragma: win32 no cover
+                # Invoked from a delivered SIGINT/SIGTERM, which the tests only drive on
+                # POSIX; the handler is registered on Windows but never exercised there.
                 nonlocal active
                 shutdown_event.set()
                 active = False
@@ -111,7 +115,9 @@ def run(config: Config) -> int:  # noqa: C901, PLR0912, PLR0915
                 _populate(processes, config, worker_func, sockets, shutdown_event, ctx)
 
                 for signal_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
-                    if hasattr(signal, signal_name):
+                    # Windows has all three, POSIX lacks SIGBREAK - so which arm runs is
+                    # platform-fixed and only one is ever seen on a given job.
+                    if hasattr(signal, signal_name):  # pragma: no branch
                         signal.signal(getattr(signal, signal_name), shutdown)
 
                 if hasattr(signal, "SIGHUP"):  # pragma: win32 no cover - SIGHUP is POSIX-only

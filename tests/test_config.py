@@ -7,6 +7,7 @@ import socket
 import ssl
 import stat
 import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import Mock, NonCallableMock
@@ -17,9 +18,23 @@ import anycorn.config
 from anycorn.config import Config, _set_reuse_socket_option
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from _pytest.monkeypatch import MonkeyPatch
 
     from tests.conftest import TLSCerts
+
+
+@pytest.fixture
+def short_unix_dir() -> Iterator[Path]:  # pragma: win32 no cover
+    """Yield a short-pathed directory for really-bound AF_UNIX sockets.
+
+    pytest's tmp_path is deep enough to exceed macOS' ~104-byte sun_path limit, so unix
+    sockets that are actually bound (rather than mocked) need a shorter base to bind under.
+    """
+    with tempfile.TemporaryDirectory(dir="/tmp") as name:
+        yield Path(name)
+
 
 access_log_format = "bob"
 h11_max_incomplete_size = 4
@@ -363,10 +378,10 @@ def test_set_quic_addresses_warns_on_an_unusable_socket_name() -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX is a Unix concept.")
 def test_create_sockets_unix_unlinks_a_stale_socket_file(  # pragma: win32 no cover
-    tmp_path: Path,
+    short_unix_dir: Path,
 ) -> None:
     """A leftover socket file at the bind path is removed before rebinding."""
-    sock_path = tmp_path / "stale.sock"
+    sock_path = short_unix_dir / "stale.sock"
     # Leave a real socket file behind, exactly as a crashed previous server would.
     stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     stale.bind(str(sock_path))
@@ -387,10 +402,10 @@ def test_create_sockets_unix_unlinks_a_stale_socket_file(  # pragma: win32 no co
 
 @pytest.mark.skipif(sys.platform == "win32", reason="os.chown is a Unix concept.")
 def test_create_sockets_unix_chowns_the_socket(  # pragma: win32 no cover
-    tmp_path: Path, monkeypatch: MonkeyPatch
+    short_unix_dir: Path, monkeypatch: MonkeyPatch
 ) -> None:
     """When user and group are set the bound socket file is chowned to them."""
-    sock_path = tmp_path / "owned.sock"
+    sock_path = short_unix_dir / "owned.sock"
     config = Config()
     config.bind = [f"unix:{sock_path}"]
     # Chown to our own ids, the one target an unprivileged test may use.

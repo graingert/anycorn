@@ -98,6 +98,7 @@ omit = [
     # tests' subprocesses, so they are never exercised on Windows.
     "*/tests/test_ktls.py",
     "*/tests/e2e/test_ktls_real.py",
+    "*/tests/e2e/test_sighup.py",
     "*/tests/assets/daemon_app.py",
     "*/tests/assets/config_daemon_false.py",
 ]

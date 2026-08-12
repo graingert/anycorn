@@ -501,7 +501,9 @@ def parse_socket_addr(family: int, address: tuple) -> tuple[str, int] | None:
         return address
     if family == socket.AF_INET6:
         return (address[0], address[1])
-    return None
+    # Reached only for AF_UNIX, which does not exist on Windows, so the case that drives
+    # this is skipped there.
+    return None  # pragma: win32 no cover
 
 
 def repr_socket_addr(family: int, address: tuple) -> str:

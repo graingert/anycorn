@@ -321,7 +321,9 @@ class Config:
                     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
                 if self.workers > 1:
-                    with contextlib.suppress(AttributeError):
+                    # SO_REUSEPORT is POSIX; the test that drives multi-worker socket reuse
+                    # is skipped where it is absent, so this is only exercised off Windows.
+                    with contextlib.suppress(AttributeError):  # pragma: win32 no cover
                         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
                 binding = (host, port)
 
