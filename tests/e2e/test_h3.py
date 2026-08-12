@@ -437,7 +437,7 @@ async def test_server_cancelled_mid_request(
 
             shutdown.set()
 
-            with anyio.fail_after(10):
+            with anyio.fail_after(10):  # pragma: no branch
                 await request_finished.wait()
 
     assert request_error is not None
@@ -687,8 +687,8 @@ async def test_concurrent_requests_are_multiplexed(
             responses[path] = response.text
 
         paths = [f"/{index}" for index in range(CONCURRENT_REQUESTS)]
-        with anyio.fail_after(10):
-            async with anyio.create_task_group() as task_group:
+        with anyio.fail_after(10):  # pragma: no branch
+            async with anyio.create_task_group() as task_group:  # pragma: no branch
                 for path in paths:
                     task_group.start_soon(_request, path)
 

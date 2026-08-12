@@ -223,7 +223,9 @@ def _extract_client_chain(ssl_object: ssl.SSLObject) -> tuple[str, ...]:
         if callable(method):
             try:
                 data = method()
-            except ssl.SSLError:
+            except (ssl.SSLError, AttributeError):
+                # CPython 3.13+ raises AttributeError from get_unverified_chain when the peer
+                # sent no certificate (its C layer hands back [None]); treat it as no chain.
                 continue
             else:
                 if data:

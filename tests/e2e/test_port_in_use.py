@@ -55,7 +55,7 @@ async def test_second_server_on_a_used_port_exits_nonzero(
         # The second server binds the same port in its parent process, so a refused
         # bind surfaces as a non-zero exit rather than a running, port-stealing server.
         async with anycorn_subprocess(args, anyio_backend_name=anyio_backend_name) as second:
-            with anyio.fail_after(15):
+            with anyio.fail_after(15):  # pragma: no branch
                 returncode = await second.wait()
 
     assert returncode != 0

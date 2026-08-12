@@ -184,7 +184,7 @@ async def test_server_cancelled_mid_request(
 
             shutdown.set()
 
-            with anyio.fail_after(10):
+            with anyio.fail_after(10):  # pragma: no branch
                 await request_finished.wait()
 
     assert request_error is not None

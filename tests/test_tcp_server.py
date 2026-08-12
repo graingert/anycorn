@@ -103,8 +103,8 @@ async def test_a_connection_whose_close_fails_does_not_crash_the_server() -> Non
     # and this one raises by design, so doing it again would be the test failing itself
     async with client_stream:
         # An escaping OSError propagates out of the task group, which is the assertion
-        with anyio.fail_after(5):
-            async with anyio.create_task_group() as task_group:
+        with anyio.fail_after(5):  # pragma: no branch
+            async with anyio.create_task_group() as task_group:  # pragma: no branch
                 task_group.start_soon(server.run)
 
                 await client_stream.send_all(

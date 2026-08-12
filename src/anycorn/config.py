@@ -301,7 +301,7 @@ class Config:
                 sock = socket.socket(socket.AF_UNIX, type_)
                 binding = bind[5:]
                 with contextlib.suppress(FileNotFoundError):
-                    if stat.S_ISSOCK(pathlib.Path(binding).stat().st_mode):
+                    if stat.S_ISSOCK(pathlib.Path(binding).stat().st_mode):  # pragma: no branch
                         pathlib.Path(binding).unlink()
             elif bind.startswith("fd://"):
                 sock = socket.socket(fileno=int(bind[5:]))
