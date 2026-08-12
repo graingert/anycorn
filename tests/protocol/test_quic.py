@@ -224,3 +224,117 @@ async def test_handle_timer_skips_a_connection_that_has_ended(tmp_path: Path) ->
 
     # Nothing was sent on behalf of a connection that is already over
     send.assert_not_awaited()
+
+
+def _cert_config(tmp_path: Path) -> Config:
+    certfile, keyfile = _write_encrypted_cert(tmp_path)
+    config = Config()
+    config.certfile = certfile
+    config.keyfile = keyfile
+    config.keyfile_password = _KEY_PASSWORD
+    return config
+
+
+@pytest.mark.anyio
+async def test_a_malformed_datagram_is_dropped(tmp_path: Path) -> None:
+    """A datagram too short to hold a QUIC header is ignored rather than raised on."""
+    protocol = _make_protocol(_cert_config(tmp_path))
+    # A long-header first byte with the rest truncated: pull_quic_header reads out of
+    # bounds, which is a ValueError.
+    await protocol.handle(RawData(data=b"\xc0", address=CLIENT_ADDRESS))
+    assert protocol.connections == {}
+
+
+@pytest.mark.anyio
+async def test_an_unsupported_version_triggers_negotiation(tmp_path: Path) -> None:
+    """An Initial for a version the server does not speak is answered with negotiation."""
+    send = AsyncMock()
+    protocol = _make_protocol(_cert_config(tmp_path), send)
+    protocol.quic_config.supported_versions = [0xDEAD_BEEF]  # none the client will use
+    await protocol.handle(RawData(data=_client_initial(), address=CLIENT_ADDRESS))
+    send.assert_awaited_once()  # a version-negotiation datagram went out
+    assert protocol.connections == {}
+
+
+@pytest.mark.anyio
+async def test_handle_closed_and_other_events_are_noops(tmp_path: Path) -> None:
+    """A Closed event has nothing to do, and any other event is ignored too."""
+    from anycorn.events import Closed, Updated  # noqa: PLC0415
+
+    protocol = _make_protocol(_cert_config(tmp_path))
+    await protocol.handle(Closed())
+    await protocol.handle(Updated(idle=True))  # neither RawData nor Closed
+    assert protocol.connections == {}
+
+
+def _events_quic(events: list[object]) -> MagicMock:
+    """Return a mock QuicConnection that yields *events* from next_event, then None."""
+    quic = MagicMock()
+    quic.next_event.side_effect = [*events, None]
+    quic.datagrams_to_send.return_value = []
+    quic.get_timer.return_value = None
+    return quic
+
+
+@pytest.mark.anyio
+async def test_handle_events_tracks_connection_ids(tmp_path: Path) -> None:
+    """A newly issued connection id is registered and a retired one is dropped."""
+    from aioquic.quic.events import ConnectionIdIssued, ConnectionIdRetired  # noqa: PLC0415
+
+    protocol = _make_protocol(_cert_config(tmp_path))
+    quic = _events_quic(
+        [
+            ConnectionIdIssued(connection_id=b"new-cid"),
+            ConnectionIdRetired(connection_id=b"old-cid"),
+        ]
+    )
+    connection = _Connection(cids={b"old-cid"}, quic=quic, task=AsyncMock())
+    protocol.connections = {b"old-cid": connection}
+    await protocol._handle_events(connection)
+    assert b"new-cid" in connection.cids
+    assert protocol.connections.get(b"new-cid") is connection
+    assert b"old-cid" not in protocol.connections
+
+
+@pytest.mark.anyio
+async def test_protocol_negotiated_sets_up_h3_with_tls_details(tmp_path: Path) -> None:
+    """Negotiating h3 builds the H3 handler and records the TLS version and cipher."""
+    import ssl  # noqa: PLC0415
+
+    from aioquic.quic.events import ProtocolNegotiated  # noqa: PLC0415
+
+    protocol = _make_protocol(_cert_config(tmp_path))
+    quic = _events_quic([ProtocolNegotiated(alpn_protocol="h3")])
+    quic.tls.version = ssl.TLSVersion.TLSv1_3
+    quic.tls.cipher_suite = 0x1301  # TLS_AES_128_GCM_SHA256
+    connection = _Connection(cids=set(), quic=quic, task=AsyncMock())
+    await protocol._handle_events(connection)
+    assert connection.h3 is not None
+
+
+@pytest.mark.anyio
+async def test_protocol_negotiated_without_a_cert_or_tls_context(tmp_path: Path) -> None:
+    """h3 is still set up when there is no server cert pem and no TLS context to read."""
+    from aioquic.quic.events import ProtocolNegotiated  # noqa: PLC0415
+
+    protocol = _make_protocol(_cert_config(tmp_path))
+    protocol._server_cert_pem = None  # no cert pem to attach
+    quic = _events_quic([ProtocolNegotiated(alpn_protocol="h3")])
+    quic.tls = None  # no TLS context to read a version/cipher from
+    connection = _Connection(cids=set(), quic=quic, task=AsyncMock())
+    await protocol._handle_events(connection)
+    assert connection.h3 is not None
+
+
+@pytest.mark.anyio
+async def test_handle_events_cleans_up_on_termination(tmp_path: Path) -> None:
+    """A terminated connection is dropped from the registry and its task stopped."""
+    from aioquic.quic.events import ConnectionTerminated  # noqa: PLC0415
+
+    protocol = _make_protocol(_cert_config(tmp_path))
+    quic = _events_quic([ConnectionTerminated(error_code=0, frame_type=None, reason_phrase="")])
+    connection = _Connection(cids={b"a", b"b"}, quic=quic, task=AsyncMock())
+    protocol.connections = {b"a": connection, b"b": connection}
+    await protocol._handle_events(connection)
+    assert protocol.connections == {}
+    connection.task.stop.assert_awaited()  # type: ignore[attr-defined]

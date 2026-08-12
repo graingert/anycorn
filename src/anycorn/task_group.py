@@ -20,9 +20,9 @@ if TYPE_CHECKING:
 
     from .config import Config
 
-if sys.version_info >= (3, 11):
+if sys.version_info >= (3, 11):  # pragma: >=3.11 cover
     from typing import Self
-else:
+else:  # pragma: <3.11 cover
     from exceptiongroup import BaseExceptionGroup
     from typing_extensions import Self
 

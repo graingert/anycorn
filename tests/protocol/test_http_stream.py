@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import call
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -35,12 +35,6 @@ from tests.helpers import LogCapture, capture_logs
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-try:
-    from unittest.mock import AsyncMock
-except ImportError:
-    # Python < 3.8
-    from unittest.mock import AsyncMock
 
 
 @pytest.fixture(name="config")
@@ -89,8 +83,8 @@ async def test_handle_request_http_1(stream: HTTPStream, http_version: str) -> N
     scope = stream.task_group.spawn_app.call_args[0][2]  # type: ignore[attr-defined]
     # Zero copy send is offered on plaintext HTTP/1.1, but only where os.sendfile exists.
     expected_extensions: dict = {"http.response.pathsend": {}}
-    if have_sendfile:
-        expected_extensions["http.response.zerocopysend"] = {}
+    if have_sendfile:  # pragma: no branch - constant per platform
+        expected_extensions["http.response.zerocopysend"] = {}  # pragma: win32 no cover
     assert scope == {
         "type": "http",
         "http_version": http_version,
@@ -640,6 +634,272 @@ async def test_trailers_without_te_do_not_crash(stream: HTTPStream) -> None:
 
     # Still awaiting a response rather than closed, so the app can go on to send one
     assert stream.state == ASGIHTTPState.REQUEST
+
+
+def _request(http_version: str = "1.1", *, method: str = "GET", headers: Any = None) -> Request:  # noqa: ANN401
+    return Request(
+        stream_id=1,
+        http_version=http_version,
+        headers=headers if headers is not None else [(b"host", b"anycorn")],
+        raw_path=b"/",
+        method=method,
+        state=ConnectionState({}),
+    )
+
+
+def _collect(stream: HTTPStream) -> list[Event]:
+    """Replace the stream's send with a real collector and return the list it fills."""
+    sent: list[Event] = []
+
+    async def send(event: Event) -> None:
+        sent.append(event)
+
+    stream.send = send
+    return sent
+
+
+@pytest.mark.anyio
+async def test_handle_ignores_an_unexpected_event(stream: HTTPStream) -> None:
+    """Handle only reacts to Request/Body/EndBody/StreamClosed; anything else is a no-op."""
+    sent = _collect(stream)
+    await stream.handle(Trailers(stream_id=1, headers=[]))
+    assert sent == []
+
+
+@pytest.mark.anyio
+async def test_push_with_a_non_str_path_is_rejected(
+    stream: HTTPStream, http_scope: HTTPScope
+) -> None:
+    """A push message must name its path as a str."""
+    stream.scope = http_scope
+    with pytest.raises(TypeError, match="should be a str"):
+        await stream.app_send(
+            cast("Any", {"type": "http.response.push", "path": 123, "headers": []})
+        )
+
+
+@pytest.mark.anyio
+async def test_zerocopysend_defaults_offset_and_count(stream: HTTPStream, tmp_path: Path) -> None:
+    """Without offset/count, the whole file from its current position is sent."""
+    payload = b"zero-copy" * 100
+    file_path = tmp_path / "payload.bin"
+    file_path.write_bytes(payload)
+    sent = _collect(stream)
+    await stream.handle(_request("1.1"))
+    await stream.app_send(
+        cast(
+            "HTTPResponseStartEvent",
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-length", str(len(payload)).encode())],
+            },
+        )
+    )
+    with file_path.open("rb") as file:
+        await stream.app_send(cast("Any", {"type": "http.response.zerocopysend", "file": file}))
+    zerocopy = next(event for event in sent if isinstance(event, ZeroCopySend))
+    assert (zerocopy.offset, zerocopy.count) == (0, len(payload))
+
+
+@pytest.mark.anyio
+async def test_zerocopysend_extension_is_advertised_when_enabled() -> None:
+    """With zero-copy send enabled, HTTP/1.1 advertises the extension on every platform."""
+    stream = HTTPStream(
+        AsyncMock(),
+        Config(),
+        WorkerContext(None),
+        AsyncMock(),
+        None,
+        None,
+        AsyncMock(),
+        1,
+        None,
+        zero_copy_send=True,  # forced on, independent of whether os.sendfile exists here
+    )
+    stream.app_put = AsyncMock()
+    capture_logs(stream.config)
+    await stream.handle(_request("1.1"))
+    scope = stream.task_group.spawn_app.call_args[0][2]  # type: ignore[attr-defined]
+    assert "http.response.zerocopysend" in scope["extensions"]
+
+
+@pytest.mark.anyio
+async def test_zerocopysend_with_explicit_offset_and_count(
+    stream: HTTPStream, tmp_path: Path
+) -> None:
+    """An explicit offset and count are passed straight through without probing the file."""
+    payload = b"window-of-bytes" * 50
+    file_path = tmp_path / "payload.bin"
+    file_path.write_bytes(payload)
+    sent = _collect(stream)
+    await stream.handle(_request("1.1"))
+    await stream.app_send(
+        cast(
+            "HTTPResponseStartEvent",
+            {"type": "http.response.start", "status": 200, "headers": [(b"content-length", b"12")]},
+        )
+    )
+    with file_path.open("rb") as file:
+        await stream.app_send(
+            cast(
+                "Any",
+                {"type": "http.response.zerocopysend", "file": file, "offset": 6, "count": 12},
+            )
+        )
+    zerocopy = next(event for event in sent if isinstance(event, ZeroCopySend))
+    assert (zerocopy.offset, zerocopy.count) == (6, 12)
+
+
+@pytest.mark.anyio
+async def test_zerocopysend_with_more_body_does_not_close(
+    stream: HTTPStream, tmp_path: Path
+) -> None:
+    """more_body keeps the response open rather than finishing it."""
+    payload = b"chunk"
+    file_path = tmp_path / "payload.bin"
+    file_path.write_bytes(payload)
+    sent = _collect(stream)
+    await stream.handle(_request("1.1"))
+    await stream.app_send(
+        cast(
+            "HTTPResponseStartEvent", {"type": "http.response.start", "status": 200, "headers": []}
+        )
+    )
+    with file_path.open("rb") as file:
+        await stream.app_send(
+            cast(
+                "Any",
+                {"type": "http.response.zerocopysend", "file": file, "more_body": True},
+            )
+        )
+    assert not any(isinstance(event, EndBody) for event in sent)
+    assert stream.state == ASGIHTTPState.RESPONSE
+
+
+@pytest.mark.anyio
+async def test_zerocopysend_with_trailers_transitions_to_trailers_state(
+    stream: HTTPStream, tmp_path: Path
+) -> None:
+    """A body sent with trailers pending moves to the TRAILERS state instead of closing."""
+    payload = b"body"
+    file_path = tmp_path / "payload.bin"
+    file_path.write_bytes(payload)
+    _collect(stream)
+    await stream.handle(_request("2", headers=[(b"te", b"trailers")]))
+    await stream.app_send(
+        cast(
+            "HTTPResponseStartEvent",
+            {"type": "http.response.start", "status": 200, "headers": [], "trailers": True},
+        )
+    )
+    with file_path.open("rb") as file:
+        await stream.app_send(cast("Any", {"type": "http.response.zerocopysend", "file": file}))
+    assert stream.state == ASGIHTTPState.TRAILERS
+
+
+@pytest.mark.anyio
+async def test_pathsend_on_http2_reads_and_frames_the_body(
+    stream: HTTPStream, tmp_path: Path
+) -> None:
+    """On HTTP/2 the file cannot be handed to os.sendfile, so it is read and framed."""
+    payload = b"h2 pathsend body\n" * 500
+    file_path = tmp_path / "payload.bin"
+    file_path.write_bytes(payload)
+    sent = _collect(stream)
+    await stream.handle(_request("2"))
+    await stream.app_send(
+        cast(
+            "HTTPResponseStartEvent",
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-length", str(len(payload)).encode())],
+            },
+        )
+    )
+    await stream.app_send(cast("Any", {"type": "http.response.pathsend", "path": str(file_path)}))
+    body = b"".join(event.data for event in sent if isinstance(event, Body))
+    assert body == payload  # read and framed as Body chunks, no ZeroCopySend
+    assert not any(isinstance(event, ZeroCopySend) for event in sent)
+
+
+@pytest.mark.anyio
+async def test_pathsend_on_a_head_request_suppresses_the_body(
+    stream: HTTPStream, tmp_path: Path
+) -> None:
+    """A HEAD response sends no body, but the file send still closes the stream."""
+    file_path = tmp_path / "payload.bin"
+    file_path.write_bytes(b"x" * 100)
+    sent = _collect(stream)
+    await stream.handle(_request("1.1", method="HEAD"))
+    await stream.app_send(
+        cast(
+            "HTTPResponseStartEvent", {"type": "http.response.start", "status": 200, "headers": []}
+        )
+    )
+    await stream.app_send(cast("Any", {"type": "http.response.pathsend", "path": str(file_path)}))
+    assert not any(isinstance(event, (Body, ZeroCopySend)) for event in sent)
+    assert any(isinstance(event, EndBody) for event in sent)
+
+
+@pytest.mark.anyio
+async def test_trailers_as_first_message_starts_the_response(stream: HTTPStream) -> None:
+    """Trailers sent first, with te: trailers offered, open a 200 response and close it."""
+    sent = _collect(stream)
+    # A non-te header before te: trailers exercises the header scan skipping past it.
+    await stream.handle(_request("2", headers=[(b"host", b"anycorn"), (b"te", b"trailers")]))
+    await stream.app_send(
+        cast("Any", {"type": "http.response.trailers", "headers": [(b"x", b"y")]})
+    )
+    responses = [event for event in sent if isinstance(event, Response)]
+    assert [event.status_code for event in responses] == [200]
+    assert any(isinstance(event, EndBody) for event in sent)
+    assert stream.state == ASGIHTTPState.CLOSED
+
+
+@pytest.mark.anyio
+async def test_send_trailers_skips_headers_other_than_te(stream: HTTPStream) -> None:
+    """The te: trailers header is found even when other headers come before it."""
+    sent = _collect(stream)
+    await stream.handle(_request("2", headers=[(b"host", b"anycorn"), (b"te", b"trailers")]))
+    await stream.app_send(
+        cast(
+            "HTTPResponseStartEvent",
+            {"type": "http.response.start", "status": 200, "headers": [], "trailers": True},
+        )
+    )
+    await stream.app_send(
+        cast("HTTPResponseBodyEvent", {"type": "http.response.body", "body": b"Body"})
+    )
+    await stream.app_send(
+        cast("Any", {"type": "http.response.trailers", "headers": [(b"X", b"V")]})
+    )
+    assert any(isinstance(event, Trailers) for event in sent)
+
+
+@pytest.mark.anyio
+async def test_more_trailers_keeps_the_stream_open(stream: HTTPStream) -> None:
+    """A trailers message with more_trailers set does not finish the response."""
+    sent = _collect(stream)
+    await stream.handle(_request("2", headers=[(b"te", b"trailers")]))
+    await stream.app_send(
+        cast(
+            "HTTPResponseStartEvent",
+            {"type": "http.response.start", "status": 200, "headers": [], "trailers": True},
+        )
+    )
+    await stream.app_send(
+        cast("HTTPResponseBodyEvent", {"type": "http.response.body", "body": b"Body"})
+    )
+    await stream.app_send(
+        cast(
+            "Any",
+            {"type": "http.response.trailers", "headers": [(b"X", b"V")], "more_trailers": True},
+        )
+    )
+    assert not any(isinstance(event, EndBody) for event in sent)
+    assert stream.state == ASGIHTTPState.TRAILERS
 
 
 @pytest.mark.parametrize(

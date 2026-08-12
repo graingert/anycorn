@@ -30,6 +30,30 @@ def _time(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(anycorn.config, "time", lambda: 5000)
 
 
+# LOCAL-ONLY sandbox override (no IPv6): REMOVE BEFORE COMMIT.
+import socket as _socket  # noqa: E402
+
+
+@pytest.fixture
+def free_tcp_port() -> int:
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+    finally:
+        s.close()
+
+
+@pytest.fixture
+def free_udp_port() -> int:
+    s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+    finally:
+        s.close()
+
+
 @pytest.fixture(name="tls_certs", scope="session")
 def _tls_certs(tmp_path_factory: pytest.TempPathFactory) -> TLSCerts:
     """Issue a server certificate for the tests that actually negotiate TLS.

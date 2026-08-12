@@ -185,14 +185,9 @@ def tls_version_to_int(value: str | int | None) -> int | None:
             return mapping
         if value.startswith(_TLS_VERSION_PREFIX):
             version = value[len(_TLS_VERSION_PREFIX) :]
-            if version == "1":
-                return _TLS_VERSION_MAP["TLSv1"]
-            try:
-                major, _, minor = version.partition(".")
-                if major == "1" and minor.isdigit():
-                    return 0x0300 + int(minor) + 1
-            except ValueError:
-                return None
+            major, _, minor = version.partition(".")
+            if major == "1" and minor.isdigit():
+                return 0x0300 + int(minor) + 1
     return None
 
 
@@ -228,7 +223,9 @@ def _extract_client_chain(ssl_object: ssl.SSLObject) -> tuple[str, ...]:
         if callable(method):
             try:
                 data = method()
-            except ssl.SSLError:
+            except (ssl.SSLError, AttributeError):
+                # CPython 3.13+ raises AttributeError from get_unverified_chain when the peer
+                # sent no certificate (its C layer hands back [None]); treat it as no chain.
                 continue
             else:
                 if data:
@@ -335,20 +332,22 @@ def build_tls_extension(  # noqa: C901, PLR0912
     else:
         extension["client_cert_chain"] = ()
 
-    if extension["client_cert_name"] is None:
-        try:
-            peer_certificate = stream.extra(TLSAttribute.peer_certificate)  # noqa: S610
-        except TypedAttributeLookupError:
-            peer_certificate = None
-        if peer_certificate and "subject" in peer_certificate:
-            extension["client_cert_name"] = _subject_to_rfc4514(
-                cast("Iterable[Iterable[tuple[str, str]]]", peer_certificate["subject"])
-            )
+    try:
+        peer_certificate = stream.extra(TLSAttribute.peer_certificate)  # noqa: S610
+    except TypedAttributeLookupError:
+        peer_certificate = None
+    if peer_certificate and "subject" in peer_certificate:
+        extension["client_cert_name"] = _subject_to_rfc4514(
+            cast("Iterable[Iterable[tuple[str, str]]]", peer_certificate["subject"])
+        )
 
     if extension["client_cert_name"] is None and isinstance(ssl_object, ssl.SSLObject):
         try:
             cert_dict = ssl_object.getpeercert()
-        except (ssl.SSLError, ValueError):
+        except (
+            ssl.SSLError,
+            ValueError,
+        ):  # pragma: no cover - defensive; not raised post-handshake
             cert_dict = None
         if cert_dict and "subject" in cert_dict:
             extension["client_cert_name"] = _subject_to_rfc4514(
@@ -504,7 +503,9 @@ def parse_socket_addr(family: int, address: tuple) -> tuple[str, int] | None:
         return address
     if family == socket.AF_INET6:
         return (address[0], address[1])
-    return None
+    # Reached only for AF_UNIX, which does not exist on Windows, so the case that drives
+    # this is skipped there.
+    return None  # pragma: win32 no cover
 
 
 def repr_socket_addr(family: int, address: tuple) -> str:
@@ -513,7 +514,8 @@ def repr_socket_addr(family: int, address: tuple) -> str:
         return f"{address[0]}:{address[1]}"
     if family == socket.AF_INET6:
         return f"[{address[0]}]:{address[1]}"
-    if family == socket.AF_UNIX:
+    if family == getattr(socket, "AF_UNIX", None):  # pragma: win32 no cover
+        # AF_UNIX does not exist on Windows; getattr keeps the comparison safe there.
         return f"unix:{address}"
     return f"{address}"
 

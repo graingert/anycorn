@@ -38,7 +38,7 @@ async def test_asyncio_socket_releases_socket() -> None:
 @pytest.mark.anyio
 async def test_anyio_socket_releases_socket(anyio_backend_name: str) -> None:
     """The implementation used on every platform other than Windows."""
-    if sys.platform == "win32" and anyio_backend_name == "asyncio":
+    if sys.platform == "win32" and anyio_backend_name == "asyncio":  # pragma: win32 cover
         # This is the combination the datagram module avoids: anyio's aclose() waits for
         # a connection_lost() the proactor loop never delivers, so it would hang here
         pytest.skip("anyio's UDP aclose() hangs on the proactor event loop")
@@ -147,7 +147,7 @@ async def test_anyio_receive_reraises_other_broken_resource(
 @pytest.mark.anyio
 async def test_wrap_datagram_socket_takes_ownership(anyio_backend_name: str) -> None:
     """Whichever implementation is chosen, closing it closes the adopted socket."""
-    if sys.platform == "win32" and anyio_backend_name == "asyncio":
+    if sys.platform == "win32" and anyio_backend_name == "asyncio":  # pragma: win32 cover
         pytest.skip("anyio's UDP aclose() hangs on the proactor event loop")
 
     raw = _bound_socket()
@@ -156,3 +156,49 @@ async def test_wrap_datagram_socket_takes_ownership(anyio_backend_name: str) -> 
 
     await sock.aclose()
     assert raw.fileno() == -1
+
+
+def test_datagram_protocol_flow_control() -> None:
+    """pause_writing/resume_writing gate the write_event asyncio uses for backpressure."""
+    protocol = datagram._DatagramProtocol()
+    assert protocol.write_event.is_set()  # writing is allowed to begin with
+    protocol.pause_writing()
+    assert not protocol.write_event.is_set()  # the transport buffer filled up
+    protocol.resume_writing()
+    assert protocol.write_event.is_set()  # and drained again
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_asyncio_receive_after_close_raises() -> None:
+    """Once the transport is gone, a pending receive() reports the socket as closed."""
+    server = await _AsyncioDatagramSocket.from_socket(_bound_socket())
+    await server.aclose()
+    with pytest.raises(anyio.ClosedResourceError):
+        await server.receive()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_connect_uses_the_asyncio_socket_when_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the Windows/asyncio combination is detected, the asyncio socket is chosen.
+
+    Forced on here so the selection runs on any platform, not only on a Windows runner.
+    """
+    monkeypatch.setattr(datagram, "_needs_asyncio", lambda: True)
+    sock = await datagram.connect_datagram_socket("127.0.0.1", 9125)
+    assert isinstance(sock, _AsyncioDatagramSocket)
+    await sock.aclose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_wrap_uses_the_asyncio_socket_when_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(datagram, "_needs_asyncio", lambda: True)
+    sock = await datagram.wrap_datagram_socket(_bound_socket())
+    assert isinstance(sock, _AsyncioDatagramSocket)
+    await sock.aclose()

@@ -53,7 +53,7 @@ async def _try_get(base_url: str) -> bool:
     try:
         async with httpx2.AsyncClient(base_url=base_url) as client:
             await client.get("/")
-    except httpx2.TransportError:
+    except httpx2.TransportError:  # pragma: no cover
         return False
     else:
         return True
@@ -64,7 +64,7 @@ async def _wait_until_ready(base_url: str) -> None:
         while True:
             if await _try_get(base_url):
                 return
-            await anyio.sleep(0.1)
+            await anyio.sleep(0.1)  # pragma: no cover
 
 
 @pytest.mark.anyio
@@ -73,7 +73,9 @@ async def _wait_until_ready(base_url: str) -> None:
     reason="Popen.send_signal(SIGTERM) maps directly to TerminateProcess() on "
     "Windows - it isn't real signal delivery, so no handler can intercept it.",
 )
-async def test_workers_0_sigterm_shutdown(anyio_backend_name: str, free_tcp_port: int) -> None:
+async def test_workers_0_sigterm_shutdown(  # pragma: win32 no cover
+    anyio_backend_name: str, free_tcp_port: int
+) -> None:
     """SIGTERM to a --workers 0 process is only handled gracefully on asyncio."""
     args = [APP_PATH, "--bind", f"127.0.0.1:{free_tcp_port}", "--workers", "0"]
     async with anycorn_subprocess(args, anyio_backend_name=anyio_backend_name) as process:
@@ -92,16 +94,16 @@ async def test_workers_0_sigterm_shutdown(anyio_backend_name: str, free_tcp_port
             assert returncode != 0
 
 
-def _wait_bounded(process: subprocess.Popen[bytes], timeout: float) -> int:
+def _wait_bounded(process: subprocess.Popen[bytes], timeout: float) -> int:  # pragma: win32 cover
     try:
         return process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired:  # pragma: no cover
         process.kill()
         return process.wait()
 
 
 @asynccontextmanager
-async def _new_process_group_subprocess(
+async def _new_process_group_subprocess(  # pragma: win32 cover
     args: Sequence[str], *, anyio_backend_name: str
 ) -> AsyncIterator[subprocess.Popen[bytes]]:
     """Spawn ``python -m anycorn <args>`` in its own console process group.
@@ -133,7 +135,7 @@ async def _new_process_group_subprocess(
     try:
         yield process
     finally:
-        if process.poll() is None:
+        if process.poll() is None:  # pragma: no cover
             process.terminate()
         await anyio.to_thread.run_sync(_wait_bounded, process, 5)
 
@@ -143,7 +145,9 @@ async def _new_process_group_subprocess(
     sys.platform != "win32",
     reason="CTRL_BREAK_EVENT is a Windows-only console signal.",
 )
-async def test_workers_0_ctrl_break_shutdown(anyio_backend_name: str, free_tcp_port: int) -> None:
+async def test_workers_0_ctrl_break_shutdown(  # pragma: win32 cover
+    anyio_backend_name: str, free_tcp_port: int
+) -> None:
     """CTRL_BREAK_EVENT (SIGBREAK) is the Windows analogue of the SIGINT/SIGTERM test above.
 
     Real CTRL_C_EVENT can't be aimed at a single child process on Windows:

@@ -161,7 +161,7 @@ async def test_server_cancelled_mid_request(
 
         try:
             response = await client.get("/")
-            await response.aread()
+            await response.aread()  # pragma: no cover
         except httpx2.TransportError as error:
             request_error = error
         finally:
@@ -184,7 +184,7 @@ async def test_server_cancelled_mid_request(
 
             shutdown.set()
 
-            with anyio.fail_after(10):
+            with anyio.fail_after(10):  # pragma: no branch
                 await request_finished.wait()
 
     assert request_error is not None
@@ -194,3 +194,36 @@ async def test_server_cancelled_mid_request(
         )
     else:
         assert "peer closed connection without sending complete message body" in str(request_error)
+
+
+@pytest.mark.anyio
+async def test_prior_knowledge_h2_over_cleartext(free_tcp_port: int) -> None:
+    """A client that opens with the HTTP/2 preface on a plaintext socket is upgraded to h2.
+
+    httpx2 with http2 enabled and http1 disabled speaks h2 with prior knowledge - it sends
+    the connection preface immediately rather than negotiating over ALPN. The server's
+    HTTP/1.1 handler recognises the preface and hands the connection to the HTTP/2 handler,
+    which then serves the request. This drives that upgrade with a real client.
+    """
+    config = Config()
+    config.bind = [f"{HOST}:{free_tcp_port}"]
+    config.accesslog = "-"
+    config.errorlog = "-"
+
+    async with anyio.create_task_group() as tg:
+        shutdown = anyio.Event()
+        await tg.start(
+            lambda *, task_status: anycorn.serve(
+                app, config, shutdown_trigger=shutdown.wait, task_status=task_status
+            )
+        )
+
+        async with httpx2.AsyncClient(
+            base_url=f"http://{HOST}:{free_tcp_port}", http2=True, http1=False
+        ) as client:
+            response = await client.get("/")
+
+        response.raise_for_status()
+        assert response.http_version == "HTTP/2"
+        assert response.content == b"Hello, world!"
+        shutdown.set()

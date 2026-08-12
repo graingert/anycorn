@@ -25,9 +25,9 @@ from time import time
 from typing import TYPE_CHECKING, Any, AnyStr, ClassVar
 from wsgiref.handlers import format_date_time
 
-if sys.version_info >= (3, 11):
+if sys.version_info >= (3, 11):  # pragma: >=3.11 cover
     import tomllib
-else:
+else:  # pragma: <3.11 cover
     import tomli as tomllib
 
 import contextlib
@@ -63,7 +63,7 @@ def _set_reuse_socket_option(sock: socket.socket) -> None:
         # the module importable (and statically checkable) on other platforms.
         exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE")  # noqa: B009
         sock.setsockopt(socket.SOL_SOCKET, exclusive, 1)
-    else:
+    else:  # pragma: win32 no cover - SO_REUSEADDR is the non-Windows path
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
 
@@ -231,7 +231,12 @@ class Config:
 
     def create_ssl_context(self) -> SSLContext | None:
         """Create and return an SSL context, or None if SSL is not enabled."""
-        if not self.ssl_enabled:
+        # ssl_enabled is exactly "certfile and keyfile are both set"; reading them into
+        # locals gates on the same condition while narrowing both to str for
+        # load_cert_chain, so there is no second, unreachable None-check to cover.
+        certfile = self.certfile
+        keyfile = self.keyfile
+        if certfile is None or keyfile is None:
             return None
 
         context = create_default_context(Purpose.CLIENT_AUTH)
@@ -244,12 +249,7 @@ class Config:
         context.options |= OP_NO_COMPRESSION
         context.set_alpn_protocols(self.alpn_protocols)
 
-        if self.certfile is not None and self.keyfile is not None:
-            context.load_cert_chain(
-                certfile=self.certfile,
-                keyfile=self.keyfile,
-                password=self.keyfile_password,
-            )
+        context.load_cert_chain(certfile=certfile, keyfile=keyfile, password=self.keyfile_password)
 
         if self.ca_certs is not None:
             context.load_verify_locations(self.ca_certs)
@@ -297,11 +297,11 @@ class Config:
         sockets: list[socket.socket] = []
         for bind in binds:
             binding: Any = None
-            if bind.startswith("unix:"):
+            if bind.startswith("unix:"):  # pragma: win32 no cover - AF_UNIX is not on Windows
                 sock = socket.socket(socket.AF_UNIX, type_)
                 binding = bind[5:]
                 with contextlib.suppress(FileNotFoundError):
-                    if stat.S_ISSOCK(pathlib.Path(binding).stat().st_mode):
+                    if stat.S_ISSOCK(pathlib.Path(binding).stat().st_mode):  # pragma: no branch
                         pathlib.Path(binding).unlink()
             elif bind.startswith("fd://"):
                 sock = socket.socket(fileno=int(bind[5:]))
@@ -321,13 +321,15 @@ class Config:
                     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
                 if self.workers > 1:
-                    with contextlib.suppress(AttributeError):
+                    # SO_REUSEPORT is POSIX; the test that drives multi-worker socket reuse
+                    # is skipped where it is absent, so this is only exercised off Windows.
+                    with contextlib.suppress(AttributeError):  # pragma: win32 no cover
                         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
                 binding = (host, port)
 
             _set_reuse_socket_option(sock)
 
-            if bind.startswith("unix:"):
+            if bind.startswith("unix:"):  # pragma: win32 no cover - AF_UNIX is not on Windows
                 assert binding is not None
                 # os.umask changes process-global state, so restore it in a finally:
                 # a bind() or chown() that raises would otherwise leave the worker's

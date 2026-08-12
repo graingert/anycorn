@@ -24,9 +24,9 @@ if TYPE_CHECKING:
 
     import h2.events
 
-if sys.version_info >= (3, 11):
+if sys.version_info >= (3, 11):  # pragma: >=3.11 cover
     from typing import NotRequired, Self
-else:
+else:  # pragma: <3.11 cover
     from typing_extensions import NotRequired, Self
 
 H11SendableEvent = h11.Data | h11.EndOfMessage | h11.InformationalResponse | h11.Response

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from anycorn.middleware import HTTPToHTTPSRedirectMiddleware
@@ -284,3 +286,67 @@ async def test_redirect_answers_an_unusable_host_with_400(host: bytes, status: b
     await app(_scope_with_host(host), None, send)  # type: ignore[arg-type]
 
     assert b"%d" % sent_events[0]["status"] == status
+
+
+@pytest.mark.anyio
+async def test_passes_already_secure_requests_through_to_the_app() -> None:
+    """An https request needs no redirect, so it is handed straight to the wrapped app."""
+    mock = AsyncMock()
+    app = HTTPToHTTPSRedirectMiddleware(mock, "localhost")
+    scope = HTTPScope(
+        type="http",
+        asgi={},
+        http_version="2",
+        method="GET",
+        scheme="https",  # already secure
+        path="/",
+        raw_path=b"/",
+        query_string=b"",
+        root_path="",
+        headers=[],
+        client=("127.0.0.1", 80),
+        server=None,
+        extensions={},
+        state=ConnectionState({}),
+    )
+    await app(scope, None, None)  # type: ignore[invalid-argument-type]
+    mock.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_websocket_redirect_rejects_a_non_bare_host_with_400() -> None:
+    """A Host header that is not a bare host cannot be trusted as a redirect target."""
+    app = HTTPToHTTPSRedirectMiddleware(empty_framework, None)
+    sent_events: list[dict] = []
+
+    async def send(message: dict) -> None:
+        sent_events.append(message)
+
+    scope = WebsocketScope(
+        type="websocket",
+        asgi={},
+        http_version="1.1",
+        scheme="ws",
+        path="/",
+        raw_path=b"/",
+        query_string=b"",
+        root_path="",
+        headers=[(b"host", b"example.com/elsewhere")],  # not a bare host
+        client=None,
+        server=None,
+        subprotocols=[],
+        extensions={"websocket.http.response": {}},
+        state=ConnectionState({}),
+    )
+    await app(scope, None, send)  # type: ignore[invalid-argument-type]
+    assert sent_events[0]["status"] == 400  # noqa: PLR2004
+
+
+@pytest.mark.anyio
+async def test_redirect_raises_when_no_host_can_be_determined() -> None:
+    """With no configured host and no Host header, there is nowhere to redirect to."""
+    app = HTTPToHTTPSRedirectMiddleware(empty_framework, None)
+    scope = _scope_with_host(b"placeholder")
+    scope["headers"] = [(b"x-forwarded-for", b"1.2.3.4")]  # a header, but not Host
+    with pytest.raises(ValueError, match="Host to redirect"):
+        await app(scope, None, AsyncMock())  # type: ignore[invalid-argument-type]

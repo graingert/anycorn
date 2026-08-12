@@ -5,11 +5,9 @@ from __future__ import annotations
 import logging
 import socket
 from contextlib import AsyncExitStack, asynccontextmanager
-from copy import deepcopy
-from json import dumps
 from math import inf
 from socket import AF_INET
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import anyio
 import anyio.abc
@@ -26,12 +24,12 @@ if TYPE_CHECKING:
 
     from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
-    from anycorn.typing import ASGIReceiveCallable, ASGISendCallable, Scope, WWWScope
+    from anycorn.typing import ASGIReceiveCallable, ASGISendCallable, Scope
 
 SANITY_BODY = b"Hello Anycorn"
 
 
-def tcp_socket_pair() -> tuple[socket.socket, socket.socket]:
+def tcp_socket_pair() -> tuple[socket.socket, socket.socket]:  # pragma: win32 no cover
     """Return two connected loopback TCP sockets, like ``socket.socketpair()`` but AF_INET.
 
     The sendfile tests need a real socket to ``os.sendfile`` over. ``socket.socketpair()``
@@ -87,7 +85,7 @@ class MemorySocketStream(anyio.abc.SocketStream):
         return self._attributes
 
     async def receive(self, max_bytes: int = 65536) -> bytes:
-        if not self._buffer:
+        if not self._buffer:  # pragma: no branch
             # Propagates anyio.EndOfStream once the peer has closed, which is what
             # TCPServer treats as the connection going away
             self._buffer.extend(await self._receive_stream.receive())
@@ -134,7 +132,7 @@ class MemoryClientStream(anyio.abc.AsyncResource):
         await self._send_stream.send(data)
 
     async def receive_some(self, max_bytes: int = 65536) -> bytes:
-        if not self._buffer:
+        if not self._buffer:  # pragma: no branch
             try:
                 self._buffer.extend(await self._receive_stream.receive())
             except (anyio.EndOfStream, anyio.ClosedResourceError):
@@ -250,43 +248,9 @@ def capture_logs(config: Config) -> LogCapture:
 
 
 async def empty_framework(scope: Scope, receive: Callable, send: Callable) -> None:
-    pass
-
-
-async def echo_framework(
-    input_scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable
-) -> None:
-    input_scope = cast("WWWScope", input_scope)
-    scope = deepcopy(input_scope)
-    scope["query_string"] = scope["query_string"].decode()  # type: ignore[arg-type]
-    scope["raw_path"] = scope["raw_path"].decode()  # type: ignore[arg-type]
-    scope["headers"] = [  # type: ignore[invalid-assignment]
-        (name.decode(), value.decode()) for name, value in scope["headers"]
-    ]
-
-    body = bytearray()
-    while True:
-        event = await receive()
-        if event["type"] in {"http.disconnect", "websocket.disconnect"}:
-            break
-        if event["type"] == "http.request":
-            body.extend(event.get("body", b""))
-            if not event.get("more_body", False):
-                response = dumps({"scope": scope, "request_body": body.decode()}).encode()
-                content_length = len(response)
-                await send(
-                    {
-                        "type": "http.response.start",
-                        "status": 200,
-                        "headers": [(b"content-length", str(content_length).encode())],
-                    }
-                )
-                await send({"type": "http.response.body", "body": response, "more_body": False})
-                break
-        elif event["type"] == "websocket.connect":
-            await send({"type": "websocket.accept"})  # type: ignore[misc, arg-type]
-        elif event["type"] == "websocket.receive":
-            await send({"type": "websocket.send", "text": event["text"], "bytes": event["bytes"]})
+    # A wrapped app the redirect-middleware tests never forward to: every request they send
+    # is insecure, so the middleware always answers with a redirect and this never runs.
+    pass  # pragma: no cover
 
 
 async def sanity_framework(
@@ -300,12 +264,7 @@ async def sanity_framework(
         event = await receive()
         if event["type"] in {"http.disconnect", "websocket.disconnect"}:
             break
-        if event["type"] == "lifespan.startup":
-            assert "state" in scope
-            await send({"type": "lifspan.startup.complete"})  # type: ignore[misc, arg-type]
-        elif event["type"] == "lifespan.shutdown":
-            await send({"type": "lifspan.shutdown.complete"})  # type: ignore[misc, arg-type]
-        elif event["type"] == "http.request" and event.get("more_body", False):
+        if event["type"] == "http.request" and event.get("more_body", False):
             body += event["body"]
         elif event["type"] == "http.request" and not event.get("more_body", False):
             body += event["body"]

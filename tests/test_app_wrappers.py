@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import sys
 from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import AsyncMock
 
 import anyio
 import anyio.from_thread
@@ -18,6 +19,7 @@ from anycorn.typing import (
     ASGISendEvent,
     ConnectionState,
     HTTPScope,
+    Scope,
 )
 
 if TYPE_CHECKING:
@@ -336,8 +338,8 @@ async def test_wsgi_empty_chunk_does_not_start_the_response() -> None:
 
 def double_start_response_app(_environ: dict, start_response: Callable) -> list[bytes]:
     start_response("200 OK", [])
-    start_response("500 Internal Server Error", [])  # second call, no exc_info
-    return [b"x"]
+    start_response("500 Internal Server Error", [])  # second call, no exc_info - raises
+    return [b"x"]  # pragma: no cover - the line above raises, so this is never reached
 
 
 @pytest.mark.anyio
@@ -360,7 +362,7 @@ def replace_after_send_app(_environ: dict, start_response: Callable) -> Iterator
         # Reporting an error once headers are already sent must re-raise it, not
         # silently replace the response (PEP 3333).
         start_response("500 Internal Server Error", [], sys.exc_info())
-    yield b"unreached"
+    yield b"unreached"  # pragma: no cover - start_response above re-raises, so this never runs
 
 
 @pytest.mark.anyio
@@ -474,3 +476,112 @@ def test_build_environ_server_port_is_always_a_usable_string(
     assert environ["SERVER_PORT"] == expected
     # A native string PEP 3333 calls for, and one an app can act on
     assert int(environ["SERVER_PORT"]) > 0
+
+
+@pytest.mark.anyio
+async def test_wsgi_websocket_scope_is_closed_immediately() -> None:
+    """A WSGI app cannot speak WebSocket, so the connection is closed at once."""
+    app = WSGIWrapper(echo_body, 2**16)
+    sent: list[Any] = []
+
+    async def send(message: Any) -> None:  # noqa: ANN401
+        sent.append(message)
+
+    scope = cast("Scope", {"type": "websocket"})
+    # receive is never read for a websocket scope, so a mock stands in for it.
+    await app(scope, AsyncMock(), send, anyio.to_thread.run_sync, anyio.from_thread.run)
+    assert sent == [{"type": "websocket.close"}]
+
+
+@pytest.mark.anyio
+async def test_wsgi_unknown_scope_type_raises() -> None:
+    app = WSGIWrapper(echo_body, 2**16)
+    scope = cast("Scope", {"type": "tcp"})
+    # The unknown type raises before receive or send are ever used.
+    with pytest.raises(RuntimeError, match="Unknown scope type"):
+        await app(scope, AsyncMock(), AsyncMock(), anyio.to_thread.run_sync, anyio.from_thread.run)
+
+
+@pytest.mark.anyio
+async def test_wsgi_lifespan_ignores_unknown_messages() -> None:
+    """A lifespan message that is neither startup nor shutdown is skipped, not fatal."""
+    app = WSGIWrapper(echo_body, 2**16)
+    to_app_send, to_app_receive = anyio.create_memory_object_stream[dict](math.inf)
+    sent: list[Any] = []
+
+    async def send(message: Any) -> None:  # noqa: ANN401
+        sent.append(message)
+
+    async with to_app_send, to_app_receive:
+        await to_app_send.send({"type": "lifespan.something-else"})  # ignored
+        await to_app_send.send({"type": "lifespan.shutdown"})
+        receive = cast("ASGIReceiveCallable", to_app_receive.receive)
+        scope = cast("Scope", {"type": "lifespan"})
+        await app(scope, receive, send, anyio.to_thread.run_sync, anyio.from_thread.run)
+
+    assert sent == [{"type": "lifespan.shutdown.complete"}]
+
+
+@pytest.mark.anyio
+async def test_wsgi_reassembles_a_multi_part_body() -> None:
+    """A request body arriving over several chunks is joined before the app runs."""
+    app = WSGIWrapper(echo_body, 2**16)
+    to_app_send, to_app_receive = anyio.create_memory_object_stream[dict](math.inf)
+    sent: list[Any] = []
+
+    async def send(message: Any) -> None:  # noqa: ANN401
+        sent.append(message)
+
+    def call_soon(func: Callable, *args: Any) -> Any:  # noqa: ANN401
+        return anyio.from_thread.run(func, *args)
+
+    async with to_app_send, to_app_receive:
+        await to_app_send.send({"type": "http.request", "body": b"foo", "more_body": True})
+        await to_app_send.send({"type": "http.request", "body": b"bar", "more_body": False})
+        receive = cast("ASGIReceiveCallable", to_app_receive.receive)
+        await app(_http_scope(), receive, send, anyio.to_thread.run_sync, call_soon)
+
+    body = b"".join(m["body"] for m in sent if m["type"] == "http.response.body")
+    assert body == b"foobar"  # echo_body returns what it read
+
+
+@pytest.mark.anyio
+async def test_wsgi_invalid_path_returns_404() -> None:
+    """A path outside the mounted root_path cannot map to a WSGI request, so it 404s."""
+    app = WSGIWrapper(echo_body, 2**16)
+    scope = _http_scope()
+    scope["path"] = "/elsewhere"
+    scope["root_path"] = "/mounted"
+    messages = await _run_app(app, scope)
+    assert messages[0] == {"type": "http.response.start", "status": 404, "headers": []}
+
+
+@pytest.mark.anyio
+async def test_wsgi_start_response_with_exc_info_before_headers_replaces_the_response() -> None:
+    """exc_info before any body has been sent lets the app pick a different status."""
+
+    def app(_environ: dict, start_response: Callable) -> list[bytes]:
+        try:
+            raise ValueError("first attempt failed")  # noqa: TRY301
+        except ValueError:
+            start_response("500 Internal Server Error", [], exc_info=sys.exc_info())
+        return [b"recovered"]
+
+    wrapper = WSGIWrapper(app, 2**16)
+    messages = await _run_app(wrapper, _http_scope())
+    start = next(m for m in messages if m["type"] == "http.response.start")
+    assert start["status"] == 500  # noqa: PLR2004
+
+
+def test_build_environ_maps_special_headers_and_merges_duplicates() -> None:
+    scope = _http_scope()
+    scope["headers"] = [
+        (b"content-length", b"5"),
+        (b"content-type", b"text/plain"),
+        (b"x-custom", b"one"),
+        (b"x-custom", b"two"),  # a repeated header is comma-joined, per WSGI
+    ]
+    environ = _build_environ(scope, b"hello")
+    assert environ["CONTENT_LENGTH"] == "5"
+    assert environ["CONTENT_TYPE"] == "text/plain"
+    assert environ["HTTP_X_CUSTOM"] == "one,two"

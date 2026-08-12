@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
-from unittest.mock import Mock, call
+from unittest.mock import AsyncMock, Mock, call
 
 import anyio
 import h11
@@ -17,9 +17,11 @@ from anycorn.protocol.events import (
     Data,
     EndBody,
     EndData,
+    InformationalResponse,
     Request,
     Response,
     StreamClosed,
+    Trailers,
     ZeroCopySend,
 )
 from anycorn.protocol.h11 import H2CProtocolRequiredError, H2ProtocolAssumedError, H11Protocol
@@ -32,12 +34,6 @@ from tests.helpers import capture_logs
 
 if TYPE_CHECKING:
     from _pytest.monkeypatch import MonkeyPatch
-
-try:
-    from unittest.mock import AsyncMock
-except ImportError:
-    # Python < 3.8
-    from unittest.mock import AsyncMock
 
 
 BASIC_HEADERS = [("Host", "anycorn"), ("Connection", "close")]
@@ -241,6 +237,72 @@ async def test_protocol_send_end_data(protocol: H11Protocol) -> None:
     protocol.stream = AsyncMock()
     await protocol.stream_send(EndData(stream_id=1))
     assert protocol.stream is not None
+
+
+@pytest.mark.anyio
+async def test_protocol_send_informational_response_is_ignored(protocol: H11Protocol) -> None:
+    """HTTP/1 has no separate informational-response event here, so it is dropped."""
+    await protocol.stream_send(InformationalResponse(stream_id=1, status_code=103, headers=[]))
+    protocol.send.assert_not_called()  # type: ignore[attr-defined]
+
+
+@pytest.mark.anyio
+async def test_protocol_send_ignores_an_unhandled_event(protocol: H11Protocol) -> None:
+    """A stream event with no HTTP/1 handling (e.g. Trailers) falls through untouched."""
+    await protocol.stream_send(Trailers(stream_id=1, headers=[]))
+    protocol.send.assert_not_called()  # type: ignore[attr-defined]
+
+
+@pytest.mark.anyio
+async def test_handle_ignores_events_other_than_raw_data_and_closed(protocol: H11Protocol) -> None:
+    """Handle only reacts to RawData and Closed; anything else is a no-op."""
+    await protocol.handle(Updated(idle=True))
+    protocol.send.assert_not_called()  # type: ignore[attr-defined]
+
+
+@pytest.mark.anyio
+async def test_close_stream_without_a_stream_is_a_no_op(protocol: H11Protocol) -> None:
+    """Closing when no stream was ever created must not fail."""
+    assert protocol.stream is None
+    await protocol._close_stream()  # nothing to close
+
+
+@pytest.mark.anyio
+async def test_a_framing_error_after_response_started_only_closes(protocol: H11Protocol) -> None:
+    """A malformed body chunk once we are past sending headers just closes the connection.
+
+    The error-status-hint reply is only sent while a response can still begin (our_state
+    is IDLE or SEND_RESPONSE). Here the response has already started, so the framing error
+    that h11 raises on the bad chunk is answered with a bare Closed, not a 4xx.
+    """
+    await protocol.handle(
+        RawData(data=b"POST / HTTP/1.1\r\nHost: anycorn\r\nTransfer-Encoding: chunked\r\n\r\n")
+    )
+    # The app starts responding, advancing our_state past SEND_RESPONSE.
+    await protocol.stream_send(
+        Response(stream_id=1, status_code=200, headers=[(b"content-length", b"0")])
+    )
+    assert protocol.connection.our_state not in {h11.IDLE, h11.SEND_RESPONSE}
+    protocol.send.reset_mock()  # type: ignore[attr-defined]
+
+    # A chunk size that is not hex is a framing error h11 raises on.
+    await protocol.handle(RawData(data=b"NOTHEX\r\n"))
+
+    assert protocol.send.call_args_list == [call(Closed())]  # type: ignore[attr-defined]
+
+
+@pytest.mark.anyio
+async def test_zerocopysend_is_swallowed_once_the_peer_has_errored(protocol: H11Protocol) -> None:
+    """A zero-copy send after the client wedged the connection into ERROR is dropped.
+
+    A malformed request drives h11's their_state to ERROR; a later send then raises
+    LocalProtocolError, which is swallowed rather than propagated - exactly as the
+    ordinary _send_h11_event path does.
+    """
+    await protocol.handle(RawData(data=b"broken nonsense\r\n\r\n"))
+    assert protocol.connection.their_state is h11.ERROR
+    # Must not raise despite the connection being unusable.
+    await protocol.stream_send(ZeroCopySend(stream_id=1, file=7, offset=0, count=10))
 
 
 @pytest.mark.anyio

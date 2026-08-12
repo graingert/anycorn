@@ -24,7 +24,7 @@ async def _is_serving(base_url: str) -> bool:
     try:
         async with httpx2.AsyncClient(base_url=base_url) as client:
             await client.get("/")
-    except httpx2.TransportError:
+    except httpx2.TransportError:  # pragma: no cover
         return False
     else:
         return True
@@ -35,7 +35,7 @@ async def _wait_until_serving(base_url: str) -> None:
         while True:
             if await _is_serving(base_url):
                 return
-            await anyio.sleep(0.1)
+            await anyio.sleep(0.1)  # pragma: no cover
 
 
 @pytest.mark.anyio
@@ -55,7 +55,7 @@ async def test_second_server_on_a_used_port_exits_nonzero(
         # The second server binds the same port in its parent process, so a refused
         # bind surfaces as a non-zero exit rather than a running, port-stealing server.
         async with anycorn_subprocess(args, anyio_backend_name=anyio_backend_name) as second:
-            with anyio.fail_after(15):
+            with anyio.fail_after(15):  # pragma: no branch
                 returncode = await second.wait()
 
     assert returncode != 0

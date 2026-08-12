@@ -35,7 +35,7 @@ async def _is_serving(base_url: str) -> bool:
     try:
         async with httpx2.AsyncClient(base_url=base_url) as client:
             await client.get("/")
-    except httpx2.TransportError:
+    except httpx2.TransportError:  # pragma: no cover
         return False
     else:
         return True
@@ -46,7 +46,7 @@ async def _wait_until_serving(base_url: str) -> None:
         while True:
             if await _is_serving(base_url):
                 return
-            await anyio.sleep(0.1)
+            await anyio.sleep(0.1)  # pragma: no cover
 
 
 @pytest.mark.anyio
@@ -92,9 +92,11 @@ async def test_reload_onto_a_syntax_error_exits_nonzero(
     finally:
         # terminate()/kill() on an already-reaped process raises under asyncio, so
         # guard each call on the process still running rather than assuming it is.
-        if process.returncode is None:
+        if process.returncode is None:  # pragma: no cover
+            # The reloader test's process exits on its own, so these last-resort cleanups
+            # for a still-running child are never needed here.
             process.terminate()
             with anyio.move_on_after(5):
                 await process.wait()
-        if process.returncode is None:
+        if process.returncode is None:  # pragma: no cover
             process.kill()

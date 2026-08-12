@@ -9,7 +9,7 @@ import pytest
 from aioquic.quic.events import QuicEvent, StopSendingReceived, StreamReset
 
 from anycorn.config import Config
-from anycorn.protocol.events import Body, EndBody, Event, Response, StreamClosed
+from anycorn.protocol.events import Body, EndBody, Event, Request, Response, StreamClosed, Trailers
 from anycorn.protocol.h3 import H3Protocol
 from anycorn.typing import ConnectionState, TLSExtension
 from anycorn.worker_context import WorkerContext
@@ -212,3 +212,118 @@ async def test_closing_a_reset_stream_stops_it_being_remembered() -> None:
     await protocol.stream_send(Body(stream_id=1, data=b"reused"))
 
     assert connection.attempted == [("data", 1)]
+
+
+@pytest.mark.anyio
+async def test_headers_received_while_terminated_are_ignored() -> None:
+    """A request arriving as the worker shuts down does not open a new stream."""
+    from aioquic.h3.events import HeadersReceived  # noqa: PLC0415
+
+    protocol = _make_protocol()
+    protocol.context.terminated = MagicMock(is_set=MagicMock(return_value=True))
+    protocol.connection = _RecordingH3Connection(
+        [HeadersReceived(stream_id=1, stream_ended=True, headers=[])]
+    )
+    await protocol.handle(MagicMock())
+    assert protocol.streams == {}
+
+
+@pytest.mark.anyio
+async def test_an_unhandled_h3_event_is_ignored() -> None:
+    """An H3 event that is neither headers nor data passes through without effect."""
+    protocol = _make_protocol()
+    protocol.connection = _RecordingH3Connection([object()])  # type: ignore[list-item]
+    await protocol.handle(MagicMock())
+    assert protocol.streams == {}
+
+
+@pytest.mark.anyio
+async def test_data_without_stream_end_is_delivered_without_closing() -> None:
+    """A DATA frame that does not end the stream delivers a body but no EndBody."""
+    from aioquic.h3.events import DataReceived  # noqa: PLC0415
+
+    protocol = _make_protocol()
+    stream = _RecordingStream()
+    protocol.streams = {1: stream}  # type: ignore[dict-item]
+    protocol.connection = _RecordingH3Connection(
+        [DataReceived(stream_id=1, data=b"partial", stream_ended=False)]
+    )
+    await protocol.handle(MagicMock())
+    assert stream.events == [Body(stream_id=1, data=b"partial")]  # no EndBody yet
+
+
+@pytest.mark.anyio
+async def test_reset_of_an_unknown_stream_only_records_it() -> None:
+    """Resetting a stream that was never opened just remembers the id."""
+    protocol = _make_protocol()
+    protocol.connection = _RecordingH3Connection()
+    unknown_id = 99
+    await protocol.handle(StreamReset(error_code=0, stream_id=unknown_id))
+    assert unknown_id in protocol._reset_streams
+    assert protocol.streams == {}
+
+
+@pytest.mark.anyio
+async def test_stream_send_trailers_are_written() -> None:
+    """Trailers are sent as a trailing HEADERS frame."""
+    protocol = _make_protocol()
+    connection = _RecordingH3Connection()
+    protocol.connection = connection
+    await protocol.stream_send(Trailers(stream_id=1, headers=[(b"x", b"y")]))
+    assert ("headers", 1) in connection.written
+    protocol.send.assert_awaited()  # type: ignore[attr-defined]
+
+
+@pytest.mark.anyio
+async def test_server_push_promises_and_opens_a_stream() -> None:
+    """A push Request sends a PUSH_PROMISE and opens the promised stream."""
+    protocol = _make_protocol()
+    protocol.task_group.spawn_app = AsyncMock(return_value=AsyncMock())  # type: ignore[attr-defined]
+    connection = _RecordingH3Connection()
+    push_id = 42
+    connection.send_push_promise = MagicMock(return_value=push_id)  # type: ignore[attr-defined]
+    protocol.connection = connection
+    await protocol.stream_send(
+        Request(
+            stream_id=1,
+            headers=[],
+            http_version="3",
+            method="GET",
+            raw_path=b"/pushed",
+            state=ConnectionState({}),
+        )
+    )
+    assert push_id in protocol.streams  # the promised stream was created
+
+
+@pytest.mark.anyio
+async def test_server_push_without_an_available_id_is_swallowed() -> None:
+    """When no push id is available, the push attempt is dropped rather than raised."""
+    from aioquic.h3.exceptions import NoAvailablePushIDError  # noqa: PLC0415
+
+    protocol = _make_protocol()
+    connection = _RecordingH3Connection()
+    connection.send_push_promise = MagicMock(side_effect=NoAvailablePushIDError())  # type: ignore[attr-defined]
+    protocol.connection = connection
+    await protocol.stream_send(
+        Request(
+            stream_id=1,
+            headers=[],
+            http_version="3",
+            method="GET",
+            raw_path=b"/pushed",
+            state=ConnectionState({}),
+        )
+    )
+    assert protocol.streams == {}  # nothing opened
+
+
+@pytest.mark.anyio
+async def test_stream_send_flushes_even_for_an_unhandled_event() -> None:
+    """A stream event h3 does not write for still flushes without touching the connection."""
+    protocol = _make_protocol()
+    connection = _RecordingH3Connection()
+    protocol.connection = connection
+    await protocol.stream_send(Event(stream_id=1))
+    assert connection.written == []
+    protocol.send.assert_awaited()  # type: ignore[attr-defined]

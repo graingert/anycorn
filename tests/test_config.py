@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import socket
 import ssl
+import stat
 import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import Mock, NonCallableMock
@@ -16,7 +18,23 @@ import anycorn.config
 from anycorn.config import Config, _set_reuse_socket_option
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from _pytest.monkeypatch import MonkeyPatch
+
+    from tests.conftest import TLSCerts
+
+
+@pytest.fixture
+def short_unix_dir() -> Iterator[Path]:  # pragma: win32 no cover
+    """Yield a short-pathed directory for really-bound AF_UNIX sockets.
+
+    pytest's tmp_path is deep enough to exceed macOS' ~104-byte sun_path limit, so unix
+    sockets that are actually bound (rather than mocked) need a shorter base to bind under.
+    """
+    with tempfile.TemporaryDirectory(dir="/tmp") as name:
+        yield Path(name)
+
 
 access_log_format = "bob"
 h11_max_incomplete_size = 4
@@ -111,7 +129,7 @@ def test_create_sockets_ip(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows is not Unix.")
-def test_create_sockets_unix(monkeypatch: MonkeyPatch) -> None:
+def test_create_sockets_unix(monkeypatch: MonkeyPatch) -> None:  # pragma: win32 no cover
     mock_socket = Mock()
     monkeypatch.setattr(socket, "socket", mock_socket)
     monkeypatch.setattr(os, "chown", Mock())
@@ -127,7 +145,9 @@ def test_create_sockets_unix(monkeypatch: MonkeyPatch) -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows is not Unix.")
-def test_create_sockets_unix_restores_umask_on_bind_failure(monkeypatch: MonkeyPatch) -> None:
+def test_create_sockets_unix_restores_umask_on_bind_failure(  # pragma: win32 no cover
+    monkeypatch: MonkeyPatch,
+) -> None:
     """A failed bind must not leak the configured umask into the rest of the process."""
     mock_socket = Mock()
     mock_socket.return_value.bind.side_effect = OSError("bind failed")
@@ -170,7 +190,7 @@ def test_create_sockets_fd(monkeypatch: MonkeyPatch) -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows is not Unix.")
-def test_create_sockets_multiple(monkeypatch: MonkeyPatch) -> None:
+def test_create_sockets_multiple(monkeypatch: MonkeyPatch) -> None:  # pragma: win32 no cover
     mock_socket = Mock()
     monkeypatch.setattr(socket, "socket", mock_socket)
     monkeypatch.setattr(os, "chown", Mock())
@@ -181,7 +201,7 @@ def test_create_sockets_multiple(monkeypatch: MonkeyPatch) -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="SO_REUSEADDR is the Unix path.")
-def test_set_reuse_socket_option_posix_sets_reuseaddr() -> None:
+def test_set_reuse_socket_option_posix_sets_reuseaddr() -> None:  # pragma: win32 no cover
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         _set_reuse_socket_option(sock)
@@ -256,3 +276,153 @@ def test_response_headers(monkeypatch: MonkeyPatch) -> None:
     ]
     config.include_server_header = False
     assert config.response_headers("test") == [(b"date", b"Sat, 02 Dec 2017 15:43:15 GMT")]
+
+
+def test_response_headers_without_the_date_header() -> None:
+    """With include_date_header off, only the server header remains."""
+    config = Config()
+    config.include_date_header = False
+    assert config.response_headers("test") == [(b"server", b"anycorn-test")]
+
+
+def test_config_from_object_dotted_instance_path() -> None:
+    """A "module.attr" string imports the module and takes the named attribute off it."""
+    sys.path.append(str(Path(__file__).parent))
+    config = Config.from_object("assets.config.instance")
+    _check_standard_config(config)
+
+
+def test_from_mapping_accepts_keyword_arguments_alone() -> None:
+    """With no mapping given, the keyword arguments become the mapping."""
+    config = Config.from_mapping(keep_alive_timeout=10)
+    assert config.keep_alive_timeout == 10  # noqa: PLR2004
+
+
+def test_cert_reqs_setter_is_deprecated_and_sets_verify_mode() -> None:
+    """The legacy cert_reqs property warns and writes through to verify_mode."""
+    config = Config()
+    with pytest.warns(Warning, match="Please use verify_mode instead"):
+        config.cert_reqs = int(ssl.CERT_REQUIRED)
+    assert config.verify_mode == ssl.CERT_REQUIRED
+
+
+@pytest.mark.parametrize("attr", ["insecure_bind", "quic_bind"])
+def test_bind_setters_wrap_a_bare_string_in_a_list(attr: str) -> None:
+    """A single string is stored as a one-element list; a list is stored as-is."""
+    config = Config()
+    setattr(config, attr, "127.0.0.1:1234")
+    assert getattr(config, attr) == ["127.0.0.1:1234"]
+    setattr(config, attr, ["127.0.0.1:1", "127.0.0.1:2"])
+    assert getattr(config, attr) == ["127.0.0.1:1", "127.0.0.1:2"]
+
+
+def test_create_ssl_context_is_none_without_a_certificate() -> None:
+    """No certfile/keyfile means TLS is off, so there is no context to build."""
+    assert Config().create_ssl_context() is None
+
+
+def test_create_ssl_context_applies_verification_settings(tls_certs: TLSCerts) -> None:
+    """ca_certs, verify_mode and verify_flags are all threaded onto the context."""
+    config = Config()
+    config.certfile = str(tls_certs.certfile)
+    config.keyfile = str(tls_certs.keyfile)
+    config.ca_certs = str(tls_certs.cafile)
+    config.verify_mode = ssl.CERT_REQUIRED
+    config.verify_flags = ssl.VERIFY_X509_STRICT
+
+    context = config.create_ssl_context()
+
+    assert context is not None
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.verify_flags & ssl.VERIFY_X509_STRICT
+
+
+@pytest.mark.skipif(
+    not hasattr(socket, "SO_REUSEPORT"), reason="SO_REUSEPORT is not available on this platform"
+)
+def test_create_sockets_reuseport_for_multiple_workers(  # pragma: win32 no cover
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """With more than one worker the listening socket is opened with SO_REUSEPORT."""
+    mock_socket = Mock()
+    monkeypatch.setattr(socket, "socket", mock_socket)
+    config = Config()
+    config.workers = 2
+    config.bind = ["127.0.0.1:5000"]
+    config.create_sockets()
+    sock = mock_socket.return_value
+    sock.setsockopt.assert_any_call(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+
+
+def test_create_sockets_fd_wrong_type_raises(monkeypatch: MonkeyPatch) -> None:
+    """A file descriptor of the wrong socket kind is rejected with SocketTypeError."""
+    mock_sock_class = Mock(
+        return_value=NonCallableMock(**{"getsockopt.return_value": socket.SOCK_DGRAM})  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(socket, "socket", mock_sock_class)
+    config = Config()
+    config.bind = ["fd://2"]  # a datagram fd offered where a stream socket is wanted
+    with pytest.raises(anycorn.config.SocketTypeError, match="Unexpected socket type"):
+        config.create_sockets()
+
+
+def test_set_quic_addresses_warns_on_an_unusable_socket_name() -> None:
+    """A socket whose name is not a host/port pair cannot yield an alt-svc header."""
+    config = Config()
+    sock = Mock()
+    sock.getsockname.return_value = "a-unix-path"  # not a (host, port) tuple
+    with pytest.warns(Warning, match="Cannot create a alt-svc header"):
+        config._set_quic_addresses([sock])
+    assert config._quic_addresses == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="AF_UNIX is a Unix concept.")
+def test_create_sockets_unix_unlinks_a_stale_socket_file(  # pragma: win32 no cover
+    short_unix_dir: Path,
+) -> None:
+    """A leftover socket file at the bind path is removed before rebinding."""
+    sock_path = short_unix_dir / "stale.sock"
+    # Leave a real socket file behind, exactly as a crashed previous server would.
+    stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    stale.bind(str(sock_path))
+    stale.close()
+    assert sock_path.exists()
+
+    config = Config()
+    config.bind = [f"unix:{sock_path}"]
+    sockets = config.create_sockets()
+    try:
+        # Rebinding only succeeds because the stale file was unlinked first.
+        assert len(sockets.insecure_sockets) == 1
+        assert stat.S_ISSOCK(sock_path.stat().st_mode)
+    finally:
+        for sock in sockets.insecure_sockets:
+            sock.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.chown is a Unix concept.")
+def test_create_sockets_unix_chowns_the_socket(  # pragma: win32 no cover
+    short_unix_dir: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """When user and group are set the bound socket file is chowned to them."""
+    sock_path = short_unix_dir / "owned.sock"
+    config = Config()
+    config.bind = [f"unix:{sock_path}"]
+    # Chown to our own ids, the one target an unprivileged test may use.
+    config.user = os.getuid()
+    config.group = os.getgid()
+
+    chown_calls: list[tuple[str, int, int]] = []
+    real_chown = os.chown
+
+    def recording_chown(path: str, uid: int, gid: int) -> None:
+        chown_calls.append((str(path), uid, gid))
+        real_chown(path, uid, gid)
+
+    monkeypatch.setattr(os, "chown", recording_chown)
+    sockets = config.create_sockets()
+    try:
+        assert chown_calls == [(str(sock_path), os.getuid(), os.getgid())]
+    finally:
+        for sock in sockets.insecure_sockets:
+            sock.close()

@@ -23,19 +23,12 @@ class InvalidPathError(Exception):
     """Raised when a WSGI app receives a request with an invalid path."""
 
 
-class _WSGIMiddleware:
+class WSGIMiddleware:
+    """ASGI middleware that runs a WSGI application in a thread pool via anyio."""
+
     def __init__(self, wsgi_app: WSGIFramework, max_body_size: int = MAX_BODY_SIZE) -> None:
         self.wsgi_app = WSGIWrapper(wsgi_app, max_body_size)
         self.max_body_size = max_body_size
-
-    async def __call__(
-        self, scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable
-    ) -> None:
-        pass
-
-
-class WSGIMiddleware(_WSGIMiddleware):
-    """ASGI middleware that runs a WSGI application in a thread pool via anyio."""
 
     async def __call__(
         self, scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable

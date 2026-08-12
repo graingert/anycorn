@@ -54,6 +54,8 @@ test = [
     "anycorn[h3]",
     "httpx2",
     "pytest>=9.1.1",
+    "pytest-cov",
+    "covdefaults",
     "mock",
     "starlette",
     "trio",
@@ -69,9 +71,37 @@ dev = [
 anycorn = "anycorn.__main__:main"
 
 [tool.pytest.ini_options]
-addopts = "-W error --showlocals --strict-markers --color=yes -v"
+addopts = "-W error --showlocals --strict-markers --color=yes -v --cov"
 testpaths = ["tests"]
 strict = true
+
+[tool.coverage.run]
+plugins = ["covdefaults"]
+# Resolve anycorn by import name, not by path: it is installed into site-packages (via a
+# .pth to src), so a path source of "src/anycorn" would not match the imported module and
+# would silently measure nothing. tests is still measured by path.
+source_pkgs = ["anycorn"]
+source = ["tests"]
+# Measure the worker subprocesses run() spawns. anycorn always uses the "spawn" start
+# method, so each worker is a fresh interpreter; patch=subprocess sets COVERAGE_PROCESS_CONFIG
+# so coverage's install-time .pth starts measurement in that interpreter. Its data lands in
+# a parallel-suffixed file that pytest-cov combines with the parent's.
+patch = ["subprocess"]
+
+[tool.coverage.report]
+omit = [
+    # Linux-only test scaffolding. ktls.py (the source) is measured with linux/>=3.12
+    # pragmas, but its test modules are skipped wholesale off Linux (kTLS is Linux-only and
+    # test_ktls_real.py additionally needs a live kernel tls ULP), so a per-line platform
+    # gate cannot express them - they would read as near-zero coverage on the macOS and
+    # Windows jobs. Likewise the daemon fixture apps run only inside the POSIX-only daemon
+    # tests' subprocesses, so they are never exercised on Windows.
+    "*/tests/test_ktls.py",
+    "*/tests/e2e/test_ktls_real.py",
+    "*/tests/e2e/test_sighup.py",
+    "*/tests/assets/daemon_app.py",
+    "*/tests/assets/config_daemon_false.py",
+]
 
 [tool.ruff]
 lint.extend-select = [# https://docs.astral.sh/ruff/settings/#extend-select

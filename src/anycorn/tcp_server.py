@@ -79,9 +79,9 @@ class TCPServer:
             # stream instead. Only TCP is used: os.sendfile is not portable over a UNIX
             # domain socket (it is unsupported on macOS), and kTLS is TCP-only anyway.
             if have_sendfile and socket.family in _SENDFILE_FAMILIES:
-                if tls_extension is None:
+                if tls_extension is None:  # pragma: win32 no cover - no os.sendfile on Windows
                     self._sendfile_socket = socket
-                else:
+                else:  # pragma: win32 no cover - no os.sendfile on Windows
                     self._sendfile_socket = self._ktls_sendfile_socket()
 
             async with TaskGroup() as task_group:
@@ -107,7 +107,9 @@ class TCPServer:
         finally:
             await self._close()
 
-    def _ktls_sendfile_socket(self) -> socket_module.socket | None:
+    def _ktls_sendfile_socket(  # pragma: win32 no cover - reached only on the sendfile path
+        self,
+    ) -> socket_module.socket | None:
         """Return the socket to os.sendfile over when the kernel owns TLS send, else None.
 
         Only a KTLSStream exposes this attribute, and only when kTLS actually activated;
@@ -152,7 +154,10 @@ class TCPServer:
     async def _transmit_file(self, event: SendFile) -> None:
         """Send a file body, with a zero-copy os.sendfile where the socket allows it."""
         if self._sendfile_socket is not None:
-            await sendfile(self._sendfile_socket, event.file, event.offset, event.count)
+            # No os.sendfile on Windows, so _sendfile_socket is never set there.
+            await sendfile(  # pragma: win32 no cover
+                self._sendfile_socket, event.file, event.offset, event.count
+            )
         else:
             # A TLS connection (or a platform without sendfile): read the window and send
             # it through the stream, which encrypts it as any other body bytes.

@@ -30,7 +30,9 @@ _MAX_SENDFILE_CHUNK = 2**30
 have_sendfile = hasattr(os, "sendfile")
 
 
-async def sendfile(sock: socket.socket, in_fd: int, offset: int | None, count: int | None) -> int:
+async def sendfile(  # pragma: win32 no cover - os.sendfile does not exist on Windows
+    sock: socket.socket, in_fd: int, offset: int | None, count: int | None
+) -> int:
     """Send bytes of ``in_fd`` to ``sock`` with ``os.sendfile``, returning the count sent.
 
     ``offset`` is where to start reading; ``None`` means the file's current position
@@ -71,7 +73,7 @@ def _pread(in_fd: int, count: int, offset: int) -> bytes:
     the application's - file position is left untouched.
     """
     if hasattr(os, "pread"):
-        return os.pread(in_fd, count, offset)
+        return os.pread(in_fd, count, offset)  # pragma: win32 no cover - os.pread is not on Windows
     dup_fd = os.dup(in_fd)
     try:
         os.lseek(dup_fd, offset, os.SEEK_SET)
