@@ -57,7 +57,7 @@ def test_pread_reads_at_offset_without_moving_the_position(tmp_path: Path) -> No
         if hasattr(os, "pread"):  # pragma: no branch - constant per platform
             # os.pread reads without moving the position; the Windows dup/seek fallback
             # shares the descriptor's offset, so it does move there and is not asserted.
-            assert os.lseek(fd, 0, os.SEEK_CUR) == 2  # noqa: PLR2004
+            assert os.lseek(fd, 0, os.SEEK_CUR) == 2  # noqa: PLR2004  # pragma: win32 no cover
 
 
 def test_pread_falls_back_to_dup_when_pread_is_absent(

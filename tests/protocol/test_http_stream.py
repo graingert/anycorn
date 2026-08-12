@@ -84,7 +84,7 @@ async def test_handle_request_http_1(stream: HTTPStream, http_version: str) -> N
     # Zero copy send is offered on plaintext HTTP/1.1, but only where os.sendfile exists.
     expected_extensions: dict = {"http.response.pathsend": {}}
     if have_sendfile:  # pragma: no branch - constant per platform
-        expected_extensions["http.response.zerocopysend"] = {}
+        expected_extensions["http.response.zerocopysend"] = {}  # pragma: win32 no cover
     assert scope == {
         "type": "http",
         "http_version": http_version,

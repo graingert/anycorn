@@ -261,7 +261,7 @@ async def test_run_swallows_an_oserror_while_setting_up() -> None:
 _AF_UNIX = getattr(socket, "AF_UNIX", None)
 
 
-class _UnixSocket:
+class _UnixSocket:  # pragma: win32 no cover
     """A raw socket over a UNIX domain, where os.sendfile is not used."""
 
     family = _AF_UNIX
@@ -275,7 +275,7 @@ class _UnixSocket:
 
 @pytest.mark.skipif(_AF_UNIX is None, reason="AF_UNIX is unavailable")
 @pytest.mark.anyio
-async def test_a_unix_socket_connection_does_not_arm_sendfile() -> None:
+async def test_a_unix_socket_connection_does_not_arm_sendfile() -> None:  # pragma: win32 no cover
     """os.sendfile is TCP-only here, so a UNIX-family connection keeps the read path."""
     client, server_stream = _stream_pair(attributes={SocketAttribute.raw_socket: _UnixSocket})
     server = _server(server_stream)

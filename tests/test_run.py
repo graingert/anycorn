@@ -58,7 +58,7 @@ class _FakeSignalModule:
     SIGTERM = signal.SIGTERM
     SIG_IGN = signal.SIG_IGN
     if hasattr(signal, "SIGHUP"):  # pragma: no branch - constant per platform
-        SIGHUP = signal.SIGHUP
+        SIGHUP = signal.SIGHUP  # pragma: win32 no cover
 
     def __init__(self) -> None:
         self.calls: list[tuple[int, Callable]] = []
@@ -216,7 +216,7 @@ def test_populate_sets_process_daemon_from_config() -> None:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="SIGHUP does not exist on Windows.")
-def test_run_registers_sighup_to_reload_workers(
+def test_run_registers_sighup_to_reload_workers(  # pragma: win32 no cover
     tls_certs: TLSCerts, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """SIGHUP must be wired up to gracefully restart workers, not left to the default action."""
@@ -318,7 +318,7 @@ def _restore_signals() -> Iterator[None]:
             signal.signal(getattr(signal, name), handler)
 
 
-def _wait_for_handler(signum: int, baseline: object) -> None:
+def _wait_for_handler(signum: int, baseline: object) -> None:  # pragma: win32 no cover
     """Block until run()/anyio installs a real handler for *signum* (or a timeout)."""
     deadline = time.monotonic() + 20
     while time.monotonic() < deadline:  # pragma: no branch - handler always arrives
@@ -327,7 +327,7 @@ def _wait_for_handler(signum: int, baseline: object) -> None:
         time.sleep(0.02)
 
 
-def _deliver_signal_once_installed(signum: int, baseline: object) -> None:
+def _deliver_signal_once_installed(signum: int, baseline: object) -> None:  # pragma: win32 no cover
     """From a helper thread, wait until a real handler for *signum* is in place, then send it.
 
     Sending only after the handler is installed avoids the window in which the default
@@ -339,7 +339,9 @@ def _deliver_signal_once_installed(signum: int, baseline: object) -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal delivery to self.")
 @pytest.mark.usefixtures("_restore_signals")
-def test_run_workers_zero_serves_in_process_until_signalled(tmp_path: Path) -> None:
+def test_run_workers_zero_serves_in_process_until_signalled(  # pragma: win32 no cover
+    tmp_path: Path,
+) -> None:
     """With no workers, run() serves in-process and shuts down on a signal, writing the pid."""
     config = Config()
     config.bind = ["127.0.0.1:0"]
@@ -372,7 +374,7 @@ def test_run_returns_nonzero_when_a_worker_fails_to_start() -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal delivery to self.")
 @pytest.mark.usefixtures("_restore_signals")
-def test_run_multiprocess_shuts_down_gracefully_on_sigterm() -> None:
+def test_run_multiprocess_shuts_down_gracefully_on_sigterm() -> None:  # pragma: win32 no cover
     """A SIGTERM to a running multi-worker server stops it cleanly with a zero exit."""
     config = Config()
     config.bind = ["127.0.0.1:0"]
@@ -392,7 +394,7 @@ def test_run_multiprocess_shuts_down_gracefully_on_sigterm() -> None:
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal delivery to self.")
 @pytest.mark.usefixtures("_restore_signals")
-def test_run_reloader_reloads_on_a_file_change(tmp_path: Path) -> None:
+def test_run_reloader_reloads_on_a_file_change(tmp_path: Path) -> None:  # pragma: win32 no cover
     """A change to a watched file reloads the workers before a SIGTERM ends the run."""
     app_file = tmp_path / "reload_app.py"
     app_file.write_text(
@@ -471,7 +473,7 @@ async def test_anyio_worker_answers_a_real_request() -> None:
                     try:
                         response = await client.get("/")
                         break
-                    except httpx2.ConnectError:
+                    except httpx2.ConnectError:  # pragma: no cover
                         await anyio.sleep(0.05)
             event.set()
 
