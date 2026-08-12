@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 
 import anyio
 import anyio.abc
+import anyio.to_thread
 import pytest
 
 import anycorn.run
@@ -24,9 +25,13 @@ from anycorn.utils import wrap_app
 from anycorn.worker_context import WorkerContext
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
+    from pathlib import Path
 
     from tests.conftest import TLSCerts
+
+if sys.version_info < (3, 11):  # pragma: <3.11 cover
+    from exceptiongroup import BaseExceptionGroup
 
 
 async def app(scope: Any, _receive: Any, send: Any) -> None:  # noqa: ANN401
@@ -52,7 +57,7 @@ class _FakeSignalModule:
     SIGINT = signal.SIGINT
     SIGTERM = signal.SIGTERM
     SIG_IGN = signal.SIG_IGN
-    if hasattr(signal, "SIGHUP"):  # not defined on Windows
+    if hasattr(signal, "SIGHUP"):  # pragma: no branch - constant per platform
         SIGHUP = signal.SIGHUP
 
     def __init__(self) -> None:
@@ -231,12 +236,8 @@ def test_run_registers_sighup_to_reload_workers(
         def join(self) -> None:
             pass
 
-        def terminate(self) -> None:
-            pass
-
     def _populate(processes: list, *_args: object, **_kwargs: object) -> None:
-        if not processes:
-            processes.append(_Process())
+        processes.append(_Process())
 
     fake_signal = _FakeSignalModule()
 
@@ -292,3 +293,339 @@ def test_run_terminates_workers_when_it_raises(
 
     assert signal.signal is not fake_signal.signal  # the real module was never touched
     assert len(terminated) == 1
+
+
+
+import os  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+_RUN_APP = "tests/assets/run_app.py:app"
+
+
+@pytest.fixture
+def _restore_signals() -> Iterator[None]:
+    """Save and restore the process-wide signal handlers run() installs.
+
+    run() does not put back the handlers it sets, so a test driving it for real would
+    otherwise leave stale handlers behind for whatever pytest runs next.
+    """
+    names = [n for n in ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK") if hasattr(signal, n)]
+    saved = {n: signal.getsignal(getattr(signal, n)) for n in names}
+    try:
+        yield
+    finally:
+        for name, handler in saved.items():
+            signal.signal(getattr(signal, name), handler)
+
+
+def _wait_for_handler(signum: int, baseline: object) -> None:
+    """Block until run()/anyio installs a real handler for *signum* (or a timeout)."""
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:  # pragma: no branch - handler always arrives
+        if signal.getsignal(signum) is not baseline:
+            return
+        time.sleep(0.02)
+
+
+def _deliver_signal_once_installed(signum: int, baseline: object) -> None:
+    """From a helper thread, wait until a real handler for *signum* is in place, then send it.
+
+    Sending only after the handler is installed avoids the window in which the default
+    action (terminate) would otherwise take the test process down.
+    """
+    _wait_for_handler(signum, baseline)
+    os.kill(os.getpid(), signum)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal delivery to self.")
+@pytest.mark.usefixtures("_restore_signals")
+def test_run_workers_zero_serves_in_process_until_signalled(tmp_path: Path) -> None:
+    """With no workers, run() serves in-process and shuts down on a signal, writing the pid."""
+    config = Config()
+    config.bind = ["127.0.0.1:0"]
+    config.workers = 0
+    config.application_path = _RUN_APP
+    config.pid_path = str(tmp_path / "anycorn.pid")
+
+    baseline = signal.getsignal(signal.SIGTERM)
+    thread = threading.Thread(
+        target=_deliver_signal_once_installed, args=(signal.SIGTERM, baseline)
+    )
+    thread.start()
+    try:
+        assert run(config) == 0
+    finally:
+        thread.join()
+    assert (tmp_path / "anycorn.pid").read_text() == str(os.getpid())
+
+
+@pytest.mark.usefixtures("_restore_signals")
+def test_run_returns_nonzero_when_a_worker_fails_to_start() -> None:
+    """A worker whose application cannot be imported exits non-zero, and run() reports it."""
+    config = Config()
+    config.bind = ["127.0.0.1:0"]
+    config.workers = 1
+    config.application_path = "anycorn_no_such_application_module:app"  # fails to import
+
+    assert run(config) != 0  # the failing worker was spawned, reaped and reported
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal delivery to self.")
+@pytest.mark.usefixtures("_restore_signals")
+def test_run_multiprocess_shuts_down_gracefully_on_sigterm() -> None:
+    """A SIGTERM to a running multi-worker server stops it cleanly with a zero exit."""
+    config = Config()
+    config.bind = ["127.0.0.1:0"]
+    config.workers = 1
+    config.application_path = _RUN_APP
+
+    baseline = signal.getsignal(signal.SIGTERM)
+    thread = threading.Thread(
+        target=_deliver_signal_once_installed, args=(signal.SIGTERM, baseline)
+    )
+    thread.start()
+    try:
+        assert run(config) == 0
+    finally:
+        thread.join()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal delivery to self.")
+@pytest.mark.usefixtures("_restore_signals")
+def test_run_reloader_reloads_on_a_file_change(tmp_path: Path) -> None:
+    """A change to a watched file reloads the workers before a SIGTERM ends the run."""
+    app_file = tmp_path / "reload_app.py"
+    app_file.write_text(
+        "async def app(scope, receive, send):\n"
+        "    await send({'type': 'http.response.start', 'status': 200, 'headers': []})\n"
+        "    await send({'type': 'http.response.body', 'body': b''})\n"
+    )
+    config = Config()
+    config.bind = ["127.0.0.1:0"]
+    config.workers = 1
+    config.use_reloader = True
+    config.application_path = f"{app_file}:app"
+
+    hup_baseline = signal.getsignal(signal.SIGHUP)
+
+    def _change_then_stop() -> None:
+        # Once the reloader loop is running (its SIGHUP handler is in place), touch the
+        # watched file so check_for_updates fires a reload, then stop the run. The pause
+        # lets files_to_watch record the original mtime before it is bumped.
+        _wait_for_handler(signal.SIGHUP, hup_baseline)
+        time.sleep(0.5)
+        future = time.time() + 30
+        os.utime(app_file, (future, future))  # a newer mtime the reloader will notice
+        time.sleep(2)  # let the reload happen and the loop respawn
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    thread = threading.Thread(target=_change_then_stop)
+    thread.start()
+    try:
+        run(config)
+    finally:
+        thread.join()
+
+
+@pytest.mark.anyio
+async def test_anyio_worker_runs_worker_serve_to_shutdown() -> None:
+    """anyio_worker really loads the app and runs worker_serve, which a set event ends."""
+    config = Config()
+    config.bind = ["127.0.0.1:0"]
+    config.application_path = _RUN_APP
+    sockets = config.create_sockets()
+
+    event = anycorn.run.get_context("spawn").Event()
+    event.set()  # already set, so worker_serve shuts down as soon as it starts
+
+    # Run the blocking worker off-thread so the test's event loop is free.
+    await anyio.to_thread.run_sync(anycorn.run.anyio_worker, config, sockets, event)
+
+
+@pytest.mark.anyio
+async def test_anyio_worker_answers_a_real_request() -> None:
+    """anyio_worker loads the app by path and answers a full GET before a set event stops it.
+
+    A pre-set event shuts the worker down before it ever serves, so this leaves the event unset,
+    drives one request to completion, then sets it - exercising the app's whole response.
+    """
+    import httpx2  # noqa: PLC0415
+
+    config = Config()
+    config.bind = ["127.0.0.1:0"]
+    config.application_path = _RUN_APP
+    config.accesslog = "-"
+    config.errorlog = "-"
+    sockets = config.create_sockets()
+    port = sockets.insecure_sockets[0].getsockname()[1]
+    event = anycorn.run.get_context("spawn").Event()
+
+    response = None
+    with anyio.fail_after(15):
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(
+                lambda: anyio.to_thread.run_sync(anycorn.run.anyio_worker, config, sockets, event)
+            )
+            async with httpx2.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
+                for _ in range(100):  # pragma: no branch  # wait for the worker to start
+                    try:
+                        response = await client.get("/")
+                        break
+                    except httpx2.ConnectError:
+                        await anyio.sleep(0.05)
+            event.set()
+
+    assert response is not None
+    assert response.status_code == 200  # noqa: PLR2004
+    """A worker with no exitcode yet is not reaped; a finished one is."""
+
+    class _Process:
+        def __init__(self, exitcode: int | None) -> None:
+            self.exitcode = exitcode
+
+        def join(self) -> None:
+            pass
+
+    running, finished = _Process(None), _Process(0)
+    processes: list = [running, finished]
+    anycorn.run._join_exited(processes)
+    assert processes == [running]
+
+
+def test_populate_raises_a_clear_error_when_the_config_cannot_be_pickled() -> None:
+    """A PicklingError from process.start becomes a helpful RuntimeError."""
+
+    class _Process:
+        daemon = False
+
+        def start(self) -> None:
+            raise PicklingError
+
+    class _Ctx:
+        def Process(self, *, target: Any, kwargs: dict) -> _Process:  # noqa: ANN401, ARG002, N802
+            return _Process()
+
+    with pytest.raises(RuntimeError, match="Cannot pickle the config"):
+        anycorn.run._populate([], Config(), lambda **_k: None, None, None, _Ctx())  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+async def test_anyio_worker_serves_tls_with_a_request_limit(tls_certs: TLSCerts) -> None:
+    """The worker listens on the secure socket, applies max_requests, and a set event ends it."""
+    config = Config()
+    config.bind = ["127.0.0.1:0"]
+    config.application_path = _RUN_APP
+    config.certfile = str(tls_certs.certfile)
+    config.keyfile = str(tls_certs.keyfile)
+    config.max_requests = 100  # exercises the jitter line
+    sockets = config.create_sockets()
+    event = anycorn.run.get_context("spawn").Event()
+    event.set()
+    await anyio.to_thread.run_sync(anycorn.run.anyio_worker, config, sockets, event)
+
+
+@pytest.mark.anyio
+async def test_anyio_worker_without_sockets_creates_its_own() -> None:
+    """With no sockets passed, the worker binds its own before serving."""
+    config = Config()
+    config.bind = ["127.0.0.1:0"]
+    config.application_path = _RUN_APP
+    event = anycorn.run.get_context("spawn").Event()
+    event.set()
+    await anyio.to_thread.run_sync(anycorn.run.anyio_worker, config, None, event)
+
+
+@pytest.mark.anyio
+async def test_worker_serve_uses_ktls_when_available(
+    tls_certs: TLSCerts, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With kTLS reported available and requested, the worker builds a KTLSListener.
+
+    kTLS activation itself needs a Linux kernel and a kTLS-capable OpenSSL, which cannot
+    be conjured here, so only the capability flag is forced; the listener is still built
+    and served for real.
+    """
+    monkeypatch.setattr(anycorn.run, "can_enable_ktls", True)
+    config = Config()
+    config.bind = ["127.0.0.1:0"]
+    config.certfile = str(tls_certs.certfile)
+    config.keyfile = str(tls_certs.keyfile)
+    config.use_ktls = True
+    sockets = config.create_sockets()
+    for sock in sockets.secure_sockets:
+        sock.listen(config.backlog)
+
+    shutdown = anyio.Event()
+    async with anyio.create_task_group() as tg:
+        binds = await tg.start(
+            partial(
+                worker_serve,
+                wrap_app(app, config.wsgi_max_body_size, None),
+                config,
+                sockets=sockets,
+                shutdown_trigger=shutdown.wait,
+            )
+        )
+        assert binds
+        assert binds[0].startswith("https://")
+        shutdown.set()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["trio"])
+async def test_worker_serve_without_a_trigger_on_trio(
+    anyio_backend: str,  # noqa: ARG001
+) -> None:
+    """On trio with no shutdown trigger, the server runs until its group is cancelled."""
+    config = Config()
+    config.bind = ["127.0.0.1:0"]
+
+    with anyio.fail_after(5):
+        async with anyio.create_task_group() as tg:
+            await tg.start(
+                partial(worker_serve, wrap_app(app, config.wsgi_max_body_size, None), config)
+            )
+            tg.cancel_scope.cancel()
+
+
+@pytest.mark.anyio
+async def test_worker_serve_reraises_a_non_shutdown_error() -> None:
+    """An error that is not a shutdown propagates out of the server rather than being eaten."""
+    config = Config()
+    config.bind = ["127.0.0.1:0"]
+
+    async def _boom() -> None:
+        raise RuntimeError("boom")
+
+    with pytest.raises(BaseExceptionGroup) as exc_info:
+        await worker_serve(
+            wrap_app(app, config.wsgi_max_body_size, None), config, shutdown_trigger=_boom
+        )
+    assert exc_info.value.subgroup(RuntimeError) is not None
+
+
+@pytest.mark.anyio
+async def test_worker_serve_answers_a_real_request() -> None:
+    """A plaintext worker serves a real GET, exercising the app end to end."""
+    import httpx2  # noqa: PLC0415
+
+    config = Config()
+    config.bind = ["127.0.0.1:0"]
+    config.accesslog = "-"
+    config.errorlog = "-"
+    shutdown = anyio.Event()
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as tg:
+            binds = await tg.start(
+                partial(
+                    worker_serve,
+                    wrap_app(app, config.wsgi_max_body_size, None),
+                    config,
+                    shutdown_trigger=shutdown.wait,
+                )
+            )
+            async with httpx2.AsyncClient(base_url=binds[0]) as client:
+                response = await client.get("/")
+            shutdown.set()
+    assert response.status_code == 200  # noqa: PLR2004

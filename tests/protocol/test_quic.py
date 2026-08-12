@@ -324,3 +324,19 @@ async def test_protocol_negotiated_without_a_cert_or_tls_context(tmp_path: Path)
     connection = _Connection(cids=set(), quic=quic, task=AsyncMock())
     await protocol._handle_events(connection)
     assert connection.h3 is not None
+
+
+@pytest.mark.anyio
+async def test_handle_events_cleans_up_on_termination(tmp_path: Path) -> None:
+    """A terminated connection is dropped from the registry and its task stopped."""
+    from aioquic.quic.events import ConnectionTerminated  # noqa: PLC0415
+
+    protocol = _make_protocol(_cert_config(tmp_path))
+    quic = _events_quic(
+        [ConnectionTerminated(error_code=0, frame_type=None, reason_phrase="")]
+    )
+    connection = _Connection(cids={b"a", b"b"}, quic=quic, task=AsyncMock())
+    protocol.connections = {b"a": connection, b"b": connection}
+    await protocol._handle_events(connection)
+    assert protocol.connections == {}
+    connection.task.stop.assert_awaited()  # type: ignore[attr-defined]

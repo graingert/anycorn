@@ -5,11 +5,9 @@ from __future__ import annotations
 import logging
 import socket
 from contextlib import AsyncExitStack, asynccontextmanager
-from copy import deepcopy
-from json import dumps
 from math import inf
 from socket import AF_INET
-from typing import TYPE_CHECKING, Any, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import anyio
 import anyio.abc
@@ -26,7 +24,7 @@ if TYPE_CHECKING:
 
     from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
-    from anycorn.typing import ASGIReceiveCallable, ASGISendCallable, Scope, WWWScope
+    from anycorn.typing import ASGIReceiveCallable, ASGISendCallable, Scope
 
 SANITY_BODY = b"Hello Anycorn"
 
@@ -251,42 +249,6 @@ def capture_logs(config: Config) -> LogCapture:
 
 async def empty_framework(scope: Scope, receive: Callable, send: Callable) -> None:
     pass
-
-
-async def echo_framework(
-    input_scope: Scope, receive: ASGIReceiveCallable, send: ASGISendCallable
-) -> None:
-    input_scope = cast("WWWScope", input_scope)
-    scope = deepcopy(input_scope)
-    scope["query_string"] = scope["query_string"].decode()  # type: ignore[arg-type]
-    scope["raw_path"] = scope["raw_path"].decode()  # type: ignore[arg-type]
-    scope["headers"] = [  # type: ignore[invalid-assignment]
-        (name.decode(), value.decode()) for name, value in scope["headers"]
-    ]
-
-    body = bytearray()
-    while True:
-        event = await receive()
-        if event["type"] in {"http.disconnect", "websocket.disconnect"}:
-            break
-        if event["type"] == "http.request":
-            body.extend(event.get("body", b""))
-            if not event.get("more_body", False):
-                response = dumps({"scope": scope, "request_body": body.decode()}).encode()
-                content_length = len(response)
-                await send(
-                    {
-                        "type": "http.response.start",
-                        "status": 200,
-                        "headers": [(b"content-length", str(content_length).encode())],
-                    }
-                )
-                await send({"type": "http.response.body", "body": response, "more_body": False})
-                break
-        elif event["type"] == "websocket.connect":
-            await send({"type": "websocket.accept"})  # type: ignore[misc, arg-type]
-        elif event["type"] == "websocket.receive":
-            await send({"type": "websocket.send", "text": event["text"], "bytes": event["bytes"]})
 
 
 async def sanity_framework(

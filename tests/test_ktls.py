@@ -27,7 +27,7 @@ from cryptography import x509
 
 from anycorn.app_wrappers import ASGIWrapper
 from anycorn.config import Config
-from anycorn.ktls import KTLSAttribute, KTLSStream, can_enable_ktls, enable_ktls
+from anycorn.ktls import KTLSAttribute, KTLSListener, KTLSStream, can_enable_ktls, enable_ktls
 from anycorn.run import worker_serve
 from anycorn.utils import build_tls_extension
 
@@ -254,9 +254,12 @@ async def test_tls_extension_is_populated_over_ktls(
 
 
 def test_can_enable_ktls_matches_platform() -> None:
-    """The capability flag is only true on Linux with an OpenSSL that exposes kTLS."""
-    if can_enable_ktls:
-        assert hasattr(ssl, "OP_ENABLE_KTLS")
+    """The capability flag is exactly Linux plus an OpenSSL that exposes kTLS.
+
+    This module only runs on Linux (see the skipif), so the flag tracks the OpenSSL constant;
+    written without a branch so it is covered whether or not this build actually has kTLS.
+    """
+    assert can_enable_ktls == hasattr(ssl, "OP_ENABLE_KTLS")
 
 
 async def _serve_tls_and_get(app: Any, tls_certs: TLSCerts) -> httpx2.Response:  # noqa: ANN401
@@ -345,3 +348,170 @@ async def test_ktls_listener_serves_pathsend(tmp_path: Path, tls_certs: TLSCerts
     response = await _serve_tls_and_get(app, tls_certs)
     response.raise_for_status()
     assert response.content == payload
+
+
+@pytest.fixture
+def _force_ktls_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force can_enable_ktls on so the kTLS-guarded paths are walked without a real ULP.
+
+    The sandbox kernel has no tls ULP, so _ktls_send_active's getsockopt still fails and the
+    send path stays userspace - but the code past the ``if not can_enable_ktls`` guard runs,
+    which is otherwise reachable only on a real kTLS host.
+    """
+    monkeypatch.setattr("anycorn.ktls.can_enable_ktls", True)
+
+
+def _bound_tcp_listener() -> tuple[socket.socket, str, int]:
+    """Return a listening IPv4 loopback socket, plus the host and port it is bound to."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen()
+    host, port = sock.getsockname()
+    return sock, host, port
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("_force_ktls_available")
+async def test_ktls_listener_accepts_and_handles_a_connection(
+    certificate_authority: trustme.CA,
+) -> None:
+    """The listener accepts a real TCP connection, handshakes it and runs the handler.
+
+    This drives serve/_accept/_handshake_and_handle and the kTLS probe in KTLSStream.wrap end
+    to end as userspace TLS, the whole path a real kTLS host would take bar the kernel send.
+    """
+    server_ctx = _server_context(certificate_authority)
+    client_ctx = _client_context(certificate_authority)
+    listen_sock, host, port = _bound_tcp_listener()
+    listener = KTLSListener(listen_sock, server_ctx, handshake_timeout=5)
+
+    received = b""
+    handled = anyio.Event()
+
+    async def handler(stream: KTLSStream) -> None:
+        nonlocal received
+        received = await stream.receive()
+        await stream.send(b"pong")
+        await stream.aclose()
+        handled.set()
+
+    def talk() -> bytes:
+        raw = socket.create_connection((host, port))
+        tls = client_ctx.wrap_socket(raw, server_hostname="localhost")
+        tls.sendall(b"ping")
+        data = tls.recv(4)
+        tls.close()
+        return data
+
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(listener.serve, handler)
+            client_got = await anyio.to_thread.run_sync(talk)
+            await handled.wait()
+            task_group.cancel_scope.cancel()
+
+    assert listener.extra_attributes[SocketAttribute.family]() == socket.AF_INET
+    assert received == b"ping"
+    assert client_got == b"pong"
+    await listener.aclose()
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("_force_ktls_available")
+async def test_ktls_listener_survives_a_failed_handshake(
+    certificate_authority: trustme.CA,
+) -> None:
+    """A client that sends garbage is dropped without the handler running or serve stopping.
+
+    The bad handshake makes OpenSSL raise an ``ssl.SSLError`` (an ``OSError``), which _retry
+    maps to ``BrokenResourceError``; _handshake_and_handle logs it and closes the connection.
+    """
+    server_ctx = _server_context(certificate_authority)
+    listen_sock, host, port = _bound_tcp_listener()
+    listener = KTLSListener(listen_sock, server_ctx, handshake_timeout=5)
+
+    async def handler(stream: KTLSStream) -> None:  # noqa: ARG001
+        pytest.fail("the handler must not run when the handshake fails")  # pragma: no cover
+
+    def talk() -> None:
+        raw = socket.create_connection((host, port))
+        raw.sendall(b"this is not a TLS ClientHello\n")
+        # Close at once: the server reads the garbage, wants more, then sees EOF and fails
+        # the handshake - rather than both sides blocking waiting for the other.
+        raw.close()
+
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(listener.serve, handler)
+            await anyio.to_thread.run_sync(talk)
+            await anyio.sleep(0.3)  # let the handshake task finish failing
+            task_group.cancel_scope.cancel()
+
+    await listener.aclose()
+
+
+@pytest.mark.anyio
+@pytest.mark.usefixtures("_force_ktls_available")
+async def test_ktls_listener_reraises_cancellation_mid_handshake(
+    certificate_authority: trustme.CA,
+) -> None:
+    """Cancelling serve while a handshake is in flight propagates, rather than being swallowed.
+
+    Passing serve an explicit task group also drives the branch where it does not open its own.
+    The client connects but never sends a ClientHello, so the handshake blocks until cancelled.
+    """
+    server_ctx = _server_context(certificate_authority)
+    listen_sock, host, port = _bound_tcp_listener()
+    listener = KTLSListener(listen_sock, server_ctx)
+
+    async def handler(stream: KTLSStream) -> None:  # noqa: ARG001
+        pytest.fail(  # pragma: no cover
+            "the handler must not run when the handshake is cancelled"
+        )
+
+    raw = socket.create_connection((host, port))
+    try:
+        with anyio.fail_after(10):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(listener.serve, handler, task_group)
+                await anyio.sleep(0.3)  # let accept run and the handshake start blocking
+                task_group.cancel_scope.cancel()
+    finally:
+        raw.close()
+        await listener.aclose()
+
+
+@pytest.mark.anyio
+async def test_receive_ends_the_stream_on_an_empty_read(
+    certificate_authority: trustme.CA, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty read - what a peer's clean close_notify produces - ends the stream.
+
+    A real close_notify races the socket teardown across backends, so the empty read the
+    handshake-completed stream would see is injected directly, exercising the ``if not data``
+    end-of-stream path deterministically.
+    """
+    server_sock, client_sock = socket.socketpair()
+    server_ctx = _server_context(certificate_authority)
+    client_ctx = _client_context(certificate_authority)
+
+    async def run_server() -> None:
+        stream = await KTLSStream.wrap(server_sock, ssl_context=server_ctx)
+
+        async def empty_read(_func: Any, *_args: Any) -> bytes:  # noqa: ANN401
+            return b""
+
+        monkeypatch.setattr(stream, "_retry", empty_read)
+        with pytest.raises(anyio.EndOfStream):
+            await stream.receive()
+        await stream.aclose()
+
+    def talk() -> None:
+        client_sock.setblocking(True)  # noqa: FBT003
+        tls = client_ctx.wrap_socket(client_sock, server_hostname="localhost")
+        tls.close()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(run_server)
+        task_group.start_soon(lambda: anyio.to_thread.run_sync(talk))

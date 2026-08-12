@@ -82,17 +82,19 @@ plugins = ["covdefaults"]
 # would silently measure nothing. tests is still measured by path.
 source_pkgs = ["anycorn"]
 source = ["tests"]
+# Measure the worker subprocesses run() spawns. anycorn always uses the "spawn" start
+# method, so each worker is a fresh interpreter; patch=subprocess sets COVERAGE_PROCESS_CONFIG
+# so coverage's install-time .pth starts measurement in that interpreter. Its data lands in
+# a parallel-suffixed file that pytest-cov combines with the parent's.
+patch = ["subprocess"]
 
 [tool.coverage.report]
 omit = [
-    # kTLS is available only on Linux with an OpenSSL that exposes OP_ENABLE_KTLS
-    # (CPython 3.12+), so its socket-backed TLS stream, listener and the tests that drive
-    # them are exercised only on the Linux 3.12+ jobs. That is a Linux-AND-3.12 condition,
-    # which covdefaults' single-tag platform/version pragmas cannot express per line (the
-    # way sendfile's plain win32 gating can), so these are omitted rather than gated. They
-    # still run and assert where kTLS is real.
-    "*/anycorn/ktls.py",
-    "*/tests/test_ktls.py",
+    # The real-kernel kTLS e2e (test_ktls_real.py) fails rather than skips when the kernel
+    # tls ULP is absent, so it only runs meaningfully on the Linux 3.12+ jobs where kTLS is
+    # live. A whole test module cannot be gated per line, so it stays omitted; ktls.py and
+    # its unit tests (test_ktls.py) are measured, with linux/>=3.12 pragmas on the lines
+    # only a real kTLS send path reaches.
     "*/tests/e2e/test_ktls_real.py",
 ]
 

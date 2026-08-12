@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 
     from .config import Config, Sockets
 
-if sys.version_info < (3, 11):
+if sys.version_info < (3, 11):  # pragma: <3.11 cover
     from exceptiongroup import BaseExceptionGroup
 
 
@@ -114,7 +114,7 @@ def run(config: Config) -> int:  # noqa: C901, PLR0912, PLR0915
                     if hasattr(signal, signal_name):
                         signal.signal(getattr(signal, signal_name), shutdown)
 
-                if hasattr(signal, "SIGHUP"):
+                if hasattr(signal, "SIGHUP"):  # pragma: win32 no cover - SIGHUP is POSIX-only
                     signal.signal(signal.SIGHUP, reload)
 
                 if config.use_reloader:
@@ -164,7 +164,7 @@ def _populate(  # noqa: PLR0913
             msg = "Cannot pickle the config, see https://docs.python.org/3/library/pickle.html#pickle-picklable"
             raise RuntimeError(msg) from error
         processes.append(process)
-        if platform.system() == "Windows":
+        if platform.system() == "Windows":  # pragma: win32 cover - a Windows-only settle
             time.sleep(0.1)
 
 
@@ -197,9 +197,9 @@ async def _wait_for_shutdown_signal(signals: tuple[signal.Signals, ...]) -> None
     """
     try:
         with anyio.open_signal_receiver(*signals) as received_signals:
-            async for _signum in received_signals:
+            async for _signum in received_signals:  # pragma: win32 no cover - POSIX path
                 return
-    except NotImplementedError:
+    except NotImplementedError:  # pragma: win32 cover - the Windows add_signal_handler fallback
         loop = asyncio.get_running_loop()
         event = asyncio.Event()
         with ExitStack() as stack:

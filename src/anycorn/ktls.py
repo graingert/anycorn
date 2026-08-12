@@ -56,17 +56,18 @@ _OP_ENABLE_KTLS = getattr(ssl, "OP_ENABLE_KTLS", None)
 can_enable_ktls = _OP_ENABLE_KTLS is not None and sys.platform == "linux"
 
 
-def enable_ktls(context: ssl.SSLContext) -> None:
+def enable_ktls(context: ssl.SSLContext) -> None:  # pragma: linux cover
     """Ask an SSL context to enable kTLS, if this build of OpenSSL/Python can.
 
     A no-op where kTLS is unavailable, so it is always safe to call - the resulting
     connection is then ordinary userspace TLS.
     """
     if _OP_ENABLE_KTLS is not None:
-        context.options |= _OP_ENABLE_KTLS
+        # OP_ENABLE_KTLS is only present on the Linux 3.12+ OpenSSL builds that ship kTLS.
+        context.options |= _OP_ENABLE_KTLS  # pragma: >=3.12 cover
 
 
-def _ktls_send_active(sock: socket.socket) -> bool:
+def _ktls_send_active(sock: socket.socket) -> bool:  # pragma: linux cover
     """Return True only when the kernel has taken over the TLS send path for *sock*.
 
     Reads the ``TLS_TX`` socket option: the kernel only answers it once OpenSSL has
@@ -81,18 +82,21 @@ def _ktls_send_active(sock: socket.socket) -> bool:
         sock.getsockopt(_SOL_TLS, _TLS_TX, _TLS_CRYPTO_INFO_SIZE)
     except OSError:
         return False
-    return True
+    # A successful read means the kernel owns the send path, which only a real kTLS
+    # socket (Linux 3.12+ with the tls ULP) ever provides.
+    return True  # pragma: >=3.12 cover
 
 
-class KTLSStream(anyio.abc.ByteStream):
+class KTLSStream(anyio.abc.ByteStream):  # pragma: linux cover
     """A byte stream doing TLS on a real socket, with kTLS zero-copy send when available."""
 
     def __init__(self, ssl_sock: ssl.SSLSocket) -> None:
         self._ssl_sock = ssl_sock
         self._raw_socket = ssl_sock
-        # A plaintext sendfile is only safe once the kernel owns the send crypto.
+        # A plaintext sendfile is only safe once the kernel owns the send crypto, which only
+        # a real kTLS socket (Linux 3.12+) reports; elsewhere this stays None.
         self._sendfile_socket: socket.socket | None = (
-            ssl_sock if _ktls_send_active(ssl_sock) else None
+            ssl_sock if _ktls_send_active(ssl_sock) else None  # pragma: >=3.12 cover
         )
 
     @property
@@ -118,9 +122,19 @@ class KTLSStream(anyio.abc.ByteStream):
             do_handshake_on_connect=False,
         )
         stream = cls(ssl_sock)
-        await stream._retry(ssl_sock.do_handshake)
-        # kTLS is negotiated during the handshake, so only now is the send path known.
-        stream._sendfile_socket = ssl_sock if _ktls_send_active(ssl_sock) else None
+        try:
+            await stream._retry(ssl_sock.do_handshake)
+        except BaseException:
+            # wrap_socket detached the raw socket, so ssl_sock now owns the fd; close it here
+            # or a failed handshake leaks it until GC (which then errors on the dead fd).
+            with contextlib.suppress(OSError):
+                ssl_sock.close()
+            raise
+        # kTLS is negotiated during the handshake, so only now is the send path known. The
+        # kernel-owned send side only exists on a real kTLS socket (Linux 3.12+).
+        stream._sendfile_socket = (
+            ssl_sock if _ktls_send_active(ssl_sock) else None  # pragma: >=3.12 cover
+        )
         return stream
 
     async def _retry(self, func: Callable[..., Any], *args: Any) -> Any:  # noqa: ANN401
@@ -130,9 +144,13 @@ class KTLSStream(anyio.abc.ByteStream):
                 return func(*args)
             except ssl.SSLWantReadError:  # noqa: PERF203
                 await anyio.wait_readable(self._ssl_sock)
-            except ssl.SSLWantWriteError:
+            except ssl.SSLWantWriteError:  # pragma: no cover
+                # Only seen when the socket send buffer fills mid-write, which a test
+                # cannot force deterministically.
                 await anyio.wait_writable(self._ssl_sock)
-            except ssl.SSLSyscallError as exc:
+            except ssl.SSLSyscallError as exc:  # pragma: no cover
+                # A syscall-level failure inside OpenSSL; the OSError path below is the
+                # one a closed socket reproducibly takes.
                 raise BrokenResourceError from exc
             except OSError as exc:
                 raise BrokenResourceError from exc
@@ -148,7 +166,9 @@ class KTLSStream(anyio.abc.ByteStream):
         """Receive and decrypt up to *max_bytes*; raise EndOfStream at close_notify/EOF."""
         try:
             data = await self._retry(self._ssl_sock.recv, max_bytes)
-        except ssl.SSLEOFError as exc:
+        except ssl.SSLEOFError as exc:  # pragma: no cover
+            # An abrupt drop with no close_notify; whether OpenSSL surfaces it here or as an
+            # empty read below is version dependent, so the empty-read path is the tested one.
             raise EndOfStream from exc
         if not data:
             raise EndOfStream
@@ -188,7 +208,7 @@ class KTLSAttribute(TypedAttributeSet):
     sendfile_socket: socket.socket | None = typed_attribute()
 
 
-class KTLSListener(anyio.abc.Listener[KTLSStream]):
+class KTLSListener(anyio.abc.Listener[KTLSStream]):  # pragma: linux cover
     """Accepts raw connections and wraps each in socket-backed (kTLS-capable) TLS.
 
     anyio's ``TLSListener`` wraps an already-accepted stream whose fd the event loop owns,
