@@ -90,12 +90,16 @@ patch = ["subprocess"]
 
 [tool.coverage.report]
 omit = [
-    # The real-kernel kTLS e2e (test_ktls_real.py) fails rather than skips when the kernel
-    # tls ULP is absent, so it only runs meaningfully on the Linux 3.12+ jobs where kTLS is
-    # live. A whole test module cannot be gated per line, so it stays omitted; ktls.py and
-    # its unit tests (test_ktls.py) are measured, with linux/>=3.12 pragmas on the lines
-    # only a real kTLS send path reaches.
+    # Linux-only test scaffolding. ktls.py (the source) is measured with linux/>=3.12
+    # pragmas, but its test modules are skipped wholesale off Linux (kTLS is Linux-only and
+    # test_ktls_real.py additionally needs a live kernel tls ULP), so a per-line platform
+    # gate cannot express them - they would read as near-zero coverage on the macOS and
+    # Windows jobs. Likewise the daemon fixture apps run only inside the POSIX-only daemon
+    # tests' subprocesses, so they are never exercised on Windows.
+    "*/tests/test_ktls.py",
     "*/tests/e2e/test_ktls_real.py",
+    "*/tests/assets/daemon_app.py",
+    "*/tests/assets/config_daemon_false.py",
 ]
 
 [tool.ruff]
