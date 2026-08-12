@@ -527,8 +527,14 @@ async def test_anyio_worker_serves_tls_with_a_request_limit(tls_certs: TLSCerts)
 
 
 @pytest.mark.anyio
-async def test_anyio_worker_without_sockets_creates_its_own() -> None:
-    """With no sockets passed, the worker binds its own before serving."""
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_anyio_worker_without_sockets_creates_its_own(anyio_backend: str) -> None:  # noqa: ARG001
+    """With no sockets passed, the worker binds its own before serving.
+
+    Pinned to asyncio: anyio_worker always runs its own anyio.run on asyncio, so the trio
+    variant covers nothing extra, and driving it through a trio-managed worker thread only
+    made socket finalisation flaky (spurious ResourceWarnings elevated to errors).
+    """
     config = Config()
     config.bind = ["127.0.0.1:0"]
     config.application_path = _RUN_APP
