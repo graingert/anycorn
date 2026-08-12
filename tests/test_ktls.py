@@ -27,7 +27,14 @@ from cryptography import x509
 
 from anycorn.app_wrappers import ASGIWrapper
 from anycorn.config import Config
-from anycorn.ktls import KTLSAttribute, KTLSListener, KTLSStream, can_enable_ktls, enable_ktls
+from anycorn.ktls import (
+    KTLSAttribute,
+    KTLSListener,
+    KTLSStream,
+    _ktls_send_active,
+    can_enable_ktls,
+    enable_ktls,
+)
 from anycorn.run import worker_serve
 from anycorn.utils import build_tls_extension
 
@@ -251,6 +258,20 @@ async def test_tls_extension_is_populated_over_ktls(
     # followed by the issuing CA; older Pythons' getpeercert fallback returns the leaf alone.
     chain = [ssl.PEM_cert_to_DER_cert(pem) for pem in extension["client_cert_chain"]]
     assert chain == ([client_leaf, issuing_ca] if sys.version_info >= (3, 13) else [client_leaf])
+
+
+def test_ktls_send_active_short_circuits_without_the_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the capability flag off, the send probe returns False without touching the socket.
+
+    On a host that really has kTLS the flag is otherwise always on, so forcing it off is what
+    exercises this guard there as well as on hosts that never had kTLS.
+    """
+    monkeypatch.setattr("anycorn.ktls.can_enable_ktls", False)
+    sock = socket.socket()
+    with sock:
+        assert _ktls_send_active(sock) is False
 
 
 def test_can_enable_ktls_matches_platform() -> None:
