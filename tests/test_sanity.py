@@ -126,7 +126,7 @@ async def test_http2_request() -> None:
         open_ = True
         while open_:
             data = await client_stream.receive_some(1024)
-            if data == b"":
+            if data == b"":  # pragma: no cover
                 break
             for event in client.receive_data(data):
                 if isinstance(event, h2.events.DataReceived):
@@ -248,7 +248,7 @@ def _recording_app(seen: list[str]) -> Callable:
     a list says it without a mock standing in for one.
     """
 
-    async def _app(scope: Scope, _receive: Callable, send: Callable) -> None:
+    async def _app(scope: Scope, _receive: Callable, send: Callable) -> None:  # pragma: no cover
         seen.append(cast("HTTPScope", scope)["path"])
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b""})
@@ -298,7 +298,7 @@ async def test_http2_rejects_a_target_with_no_asgi_path(target: bytes) -> None:
         with anyio.fail_after(5):
             while status is None:
                 data = await client_stream.receive_some(4096)
-                if data == b"":
+                if data == b"":  # pragma: no cover
                     break
                 for event in client.receive_data(data):
                     if isinstance(event, h2.events.ResponseReceived):
@@ -339,7 +339,7 @@ async def test_http2_websocket_rejects_a_target_with_no_asgi_path(target: bytes)
         with anyio.fail_after(5):
             while status is None:
                 data = await client_stream.receive_some(4096)
-                if data == b"":
+                if data == b"":  # pragma: no cover
                     break
                 for event in client.receive_data(data):
                     if isinstance(event, h2.events.ResponseReceived):
@@ -382,7 +382,7 @@ async def test_http2_rejected_request_may_still_send_a_body() -> None:
         with anyio.fail_after(5):
             while status is None:
                 data = await client_stream.receive_some(4096)
-                if data == b"":
+                if data == b"":  # pragma: no cover
                     break
                 for event in client.receive_data(data):
                     if isinstance(event, h2.events.ResponseReceived):

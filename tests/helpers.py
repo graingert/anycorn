@@ -85,7 +85,7 @@ class MemorySocketStream(anyio.abc.SocketStream):
         return self._attributes
 
     async def receive(self, max_bytes: int = 65536) -> bytes:
-        if not self._buffer:
+        if not self._buffer:  # pragma: no branch
             # Propagates anyio.EndOfStream once the peer has closed, which is what
             # TCPServer treats as the connection going away
             self._buffer.extend(await self._receive_stream.receive())
@@ -132,7 +132,7 @@ class MemoryClientStream(anyio.abc.AsyncResource):
         await self._send_stream.send(data)
 
     async def receive_some(self, max_bytes: int = 65536) -> bytes:
-        if not self._buffer:
+        if not self._buffer:  # pragma: no branch
             try:
                 self._buffer.extend(await self._receive_stream.receive())
             except (anyio.EndOfStream, anyio.ClosedResourceError):
@@ -248,7 +248,9 @@ def capture_logs(config: Config) -> LogCapture:
 
 
 async def empty_framework(scope: Scope, receive: Callable, send: Callable) -> None:
-    pass
+    # A wrapped app the redirect-middleware tests never forward to: every request they send
+    # is insecure, so the middleware always answers with a redirect and this never runs.
+    pass  # pragma: no cover
 
 
 async def sanity_framework(
@@ -262,12 +264,7 @@ async def sanity_framework(
         event = await receive()
         if event["type"] in {"http.disconnect", "websocket.disconnect"}:
             break
-        if event["type"] == "lifespan.startup":
-            assert "state" in scope
-            await send({"type": "lifspan.startup.complete"})  # type: ignore[misc, arg-type]
-        elif event["type"] == "lifespan.shutdown":
-            await send({"type": "lifspan.shutdown.complete"})  # type: ignore[misc, arg-type]
-        elif event["type"] == "http.request" and event.get("more_body", False):
+        if event["type"] == "http.request" and event.get("more_body", False):
             body += event["body"]
         elif event["type"] == "http.request" and not event.get("more_body", False):
             body += event["body"]

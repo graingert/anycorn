@@ -60,13 +60,10 @@ def gated_framework(release: anyio.Event) -> Callable:
     ) -> None:
         while True:
             event = await receive()
-            if event["type"] == "http.disconnect":
-                break
-            if event["type"] == "lifespan.startup":
-                await send({"type": "lifespan.startup.complete"})
-            elif event["type"] == "lifespan.shutdown":
-                await send({"type": "lifespan.shutdown.complete"})
-            elif event["type"] == "http.request" and not event.get("more_body", False):
+            # These in-memory tests only ever drive http.request; the request may span
+            # several events, so read until the body is complete, then answer once released.
+            complete = event["type"] == "http.request" and not event.get("more_body", False)
+            if complete:  # pragma: no branch
                 await release.wait()
                 await send(
                     {
@@ -76,7 +73,7 @@ def gated_framework(release: anyio.Event) -> Callable:
                     }
                 )
                 await send({"type": "http.response.body", "body": b"", "more_body": False})
-                break
+                return
 
     return _app
 
@@ -97,7 +94,8 @@ async def _read_response(client: h11.Connection, client_stream: MemoryClientStre
             client.receive_data(await client_stream.receive_some(1024))
         elif isinstance(event, h11.Response):
             response = event
-        elif isinstance(event, h11.EndOfMessage):
+        elif isinstance(event, h11.EndOfMessage):  # pragma: no branch
+            # The responses here carry no body, so EndOfMessage always follows the head.
             assert response is not None
             return response
 

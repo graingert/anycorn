@@ -60,7 +60,8 @@ async def test_starlette_app_detects_a_client_disconnect() -> None:
                 detected["disconnected"] = True
                 break
             await anyio.sleep(0.001)
-        else:
+        else:  # pragma: no cover
+            # Only reached if the disconnect is never seen - the bug this guards against.
             detected["disconnected"] = False
         return PlainTextResponse("ok")
 

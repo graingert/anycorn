@@ -92,9 +92,11 @@ async def test_reload_onto_a_syntax_error_exits_nonzero(
     finally:
         # terminate()/kill() on an already-reaped process raises under asyncio, so
         # guard each call on the process still running rather than assuming it is.
-        if process.returncode is None:
+        if process.returncode is None:  # pragma: no cover
+            # The reloader test's process exits on its own, so these last-resort cleanups
+            # for a still-running child are never needed here.
             process.terminate()
             with anyio.move_on_after(5):
                 await process.wait()
-        if process.returncode is None:
+        if process.returncode is None:  # pragma: no cover
             process.kill()

@@ -161,7 +161,7 @@ async def test_server_cancelled_mid_request(
 
         try:
             response = await client.get("/")
-            await response.aread()
+            await response.aread()  # pragma: no cover
         except httpx2.TransportError as error:
             request_error = error
         finally:

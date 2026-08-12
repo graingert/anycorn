@@ -52,7 +52,9 @@ async def anycorn_subprocess(
             process.terminate()
             with anyio.move_on_after(5):
                 await process.wait()
-        if process.returncode is None:
+        if process.returncode is None:  # pragma: no cover
+            # A last-resort kill for a process that ignored terminate(); the tests here
+            # all stop cleanly within the timeout, so this fallback is never reached.
             process.kill()
             with anyio.move_on_after(5):
                 await process.wait()
