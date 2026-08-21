@@ -574,6 +574,9 @@ async def test_a_connect_with_no_path_does_not_crash_the_server(
     stream and read a :path that was never set, raising UnboundLocalError out of
     handle - and, with nothing catching it, out of UDPServer.run, taking the whole
     worker down. Driven here by a real client putting the CONNECT on the wire.
+
+    Carrying no :protocol, this is a request for a plain tunnel rather than the
+    extended CONNECT a WebSocket uses, so the answer is 501 (RFC 8441 s4).
     """
     seen: list[str] = []
 
@@ -600,7 +603,7 @@ async def test_a_connect_with_no_path_does_not_crash_the_server(
                 async with _H3Transport.connect(HOST, free_udp_port, tls_certs) as transport:
                     with anyio.fail_after(10):
                         status = await transport.connect_without_path()
-                    assert status == 400  # noqa: PLR2004
+                    assert status == 501  # noqa: PLR2004
                     assert seen == [], "the app was handed a request it should never have seen"
 
                     # The connection is still usable, rather than having been taken down
