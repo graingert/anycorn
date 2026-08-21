@@ -108,8 +108,14 @@ class H3Protocol:
     async def stream_send(self, event: StreamEvent) -> None:
         """Send a stream event to the remote client."""
         if isinstance(event, StreamClosed):
-            self.streams.pop(event.stream_id, None)
+            stream = self.streams.pop(event.stream_id, None)
             self._reset_streams.discard(event.stream_id)
+            if stream is not None:
+                # Handed back to the stream, as h2 does and as _reset_stream does here,
+                # so it knows it is closed and the app hears the disconnect. Popping it
+                # and no more left a WebSocket that closed itself - which is how every
+                # WebSocket ends - with an app still waiting on receive() for ever.
+                await stream.handle(event)
             return
         if isinstance(event, Request):
             await self._create_server_push(event.stream_id, event.raw_path, event.headers)

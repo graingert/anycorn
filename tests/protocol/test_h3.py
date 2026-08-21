@@ -42,16 +42,6 @@ def _make_protocol() -> H3Protocol:
 
 
 @pytest.mark.anyio
-async def test_stream_send_stream_closed_removes_stream() -> None:
-    protocol = _make_protocol()
-    protocol.streams = {1: object(), 2: object()}  # type: ignore[dict-item]
-
-    await protocol.stream_send(StreamClosed(stream_id=1))
-
-    assert protocol.streams == {2: protocol.streams[2]}
-
-
-@pytest.mark.anyio
 async def test_stream_send_stream_closed_is_idempotent() -> None:
     protocol = _make_protocol()
 
@@ -118,6 +108,25 @@ class _RecordingH3Connection:
         end_stream: bool,  # noqa: ARG002, FBT001
     ) -> None:
         self._write("data", stream_id)
+
+
+@pytest.mark.anyio
+async def test_stream_send_stream_closed_removes_stream() -> None:
+    """The stream is dropped, and told, so the app hears the disconnect.
+
+    Popping it and no more left a WebSocket that closed itself - which is how every
+    WebSocket ends - with an app still waiting on receive() for ever. h2 hands the
+    event back the same way, as does _reset_stream here.
+    """
+    protocol = _make_protocol()
+    closing, other = _RecordingStream(), _RecordingStream()
+    protocol.streams = {1: closing, 2: other}  # type: ignore[dict-item]
+
+    await protocol.stream_send(StreamClosed(stream_id=1))
+
+    assert protocol.streams == {2: other}
+    assert closing.events == [StreamClosed(stream_id=1)]
+    assert other.events == []
 
 
 @pytest.mark.anyio
